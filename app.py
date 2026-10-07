@@ -41,9 +41,10 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
+    # Lista de modelos atualizados
     endpoints = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={api_key}",
     ]
 
     prompt_texto = """
