@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS plantas (
 """
 )
 
-# Garante que a coluna imagem_base64 exista caso a tabela anterior não a tivesse
+# Adiciona a coluna imagem_base64 caso a tabela já exista sem ela
 try:
     cursor.execute("ALTER TABLE plantas ADD COLUMN imagem_base64 TEXT")
     conn.commit()
@@ -38,7 +38,7 @@ except sqlite3.OperationalError:
 
 
 def extrair_texto_da_resposta(dados):
-    """Extrai texto com segurança da estrutura de resposta JSON da API Gemini."""
+    """Extrai texto com segurança da estrutura de resposta JSON do Gemini."""
     if not isinstance(dados, dict):
         return None
 
@@ -46,15 +46,15 @@ def extrair_texto_da_resposta(dados):
     if not candidates:
         return None
 
-    content = candidates[0].get("content", {})
-    parts = content.get("parts", [])
-
     textos = []
-    for part in parts:
-        if isinstance(part, dict) and "text" in part:
-            txt = part["text"].strip()
-            if txt:
-                textos.append(txt)
+    for candidate in candidates:
+        content = candidate.get("content", {})
+        parts = content.get("parts", [])
+        for part in parts:
+            if isinstance(part, dict) and "text" in part:
+                txt = part["text"].strip()
+                if txt:
+                    textos.append(txt)
 
     if textos:
         return "\n".join(textos)
@@ -63,7 +63,7 @@ def extrair_texto_da_resposta(dados):
 
 
 def converter_imagem_para_base64(imagem_pil):
-    """Converte a imagem PIL para string Base64 para gravação no SQLite."""
+    """Converte a imagem PIL para string Base64 compacta para gravação no SQLite."""
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
@@ -74,18 +74,14 @@ def converter_imagem_para_base64(imagem_pil):
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Faz chamadas REST resilientes à API Gemini e retorna sempre (texto, img_b64)."""
+    """Chamada direta ao modelo gemini-3.8-flash com tentativas automáticas."""
     img_b64 = converter_imagem_para_base64(imagem_pil)
 
-    # Modelos estáveis para o endpoint v1beta
-    modelos = [
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-        "gemini-2.5-flash",
-    ]
+    modelo_ativo = "gemini-3.8-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_ativo}:generateContent?key={api_key}"
 
     prompt_texto = """
-    Analise esta imagem de planta e responda exatamente neste formato:
+    Analise esta imagem de planta e responda estritamente no seguinte formato:
     Nome Comum: [Nome comum da planta em português]
     Nome Científico: [Nome científico em latim]
     Cuidados: [Breve resumo sobre iluminação, rega e solo]
@@ -111,38 +107,32 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     headers = {"Content-Type": "application/json"}
     erros = []
 
-    for modelo in modelos:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+    for tentativa in range(3):
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=60
+            )
+            dados = response.json()
 
-        for tentativa in range(2):
-            try:
-                response = requests.post(
-                    url, json=payload, headers=headers, timeout=45
-                )
-                dados = response.json()
+            if response.status_code == 200:
+                texto = extrair_texto_da_resposta(dados)
+                if texto:
+                    return texto, img_b64
+                erros.append("A API respondeu, mas não retornou texto válido.")
+            else:
+                msg = dados.get("error", {}).get("message", response.text)
+                erros.append(f"Erro {response.status_code}: {msg}")
 
-                if response.status_code == 200:
-                    texto = extrair_texto_da_resposta(dados)
-                    if texto:
-                        return texto, img_b64
-                    erros.append(f"[{modelo}]: Resposta sem texto válido.")
-                else:
-                    msg = dados.get("error", {}).get("message", response.text)
-                    erros.append(f"[{modelo}]: Erro {response.status_code} - {msg}")
+            if response.status_code in [429, 503] or "high demand" in response.text.lower():
+                time.sleep(2)
+                continue
 
-                if response.status_code in [429, 503] or "high demand" in response.text.lower():
-                    time.sleep(1.5)
-                    continue
-                else:
-                    break
+        except Exception as e:
+            erros.append(str(e))
+            time.sleep(2)
 
-            except Exception as e:
-                erros.append(f"[{modelo}]: {str(e)}")
-                time.sleep(1)
-
-    # Se nenhum modelo funcionou, dispara a mensagem com os detalhes dos testes
     detalhes = "\n".join(erros)
-    raise Exception(f"Não foi possível processar a imagem no momento.\nDetalhes:\n{detalhes}")
+    raise Exception(f"Servidor indisponível no momento.\nDetalhes:\n{detalhes}")
 
 
 # Interface Principal
@@ -197,7 +187,7 @@ with tab1:
                     st.success("Planta Identificada com Sucesso!")
                     st.markdown(texto_resposta)
 
-                    # Leitura dos campos retornados pela IA
+                    # Leitura dos campos retornados
                     dados_planta = {
                         "Nome Comum": "Desconhecido",
                         "Nome Científico": "Desconhecido",
