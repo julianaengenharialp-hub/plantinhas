@@ -1,6 +1,7 @@
 import base64
 import io
 import sqlite3
+import time
 import requests
 from PIL import Image
 import streamlit as st
@@ -30,8 +31,8 @@ conn.commit()
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Função que converte a imagem e faz varredura dinâmica nos modelos do Gemini."""
-    # Trata transparência (RGBA/PNG) para formato JPEG
+    """Converte a imagem e faz requisições resilientes aos modelos flash com retry automático."""
+    # Trata transparência (RGBA/PNG) convertendo para RGB/JPEG
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
@@ -41,11 +42,10 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-    # Lista de modelos atualizada conforme recomendação exata da API
+    # Modelos flash leves e compatíveis com a chave gratuita
     modelos_para_testar = [
         "gemini-3.8-flash",
-        "gemini-3.1-pro-preview",
-        "gemini-2.5-flash",
+        "gemini-1.5-flash-8b",
     ]
 
     prompt_texto = """
@@ -77,21 +77,38 @@ def analisar_planta_api_direta(imagem_pil, api_key):
 
     for modelo in modelos_para_testar:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
-        try:
-            response = requests.post(
-                url, json=payload, headers=headers, timeout=20
-            )
-            dados = response.json()
 
-            if response.status_code == 200:
-                return dados["candidates"][0]["content"]["parts"][0]["text"]
-            else:
+        # Tenta até 3 vezes por modelo em caso de pico temporário no servidor
+        for tentativa in range(3):
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers, timeout=25
+                )
+                dados = response.json()
+
+                if response.status_code == 200:
+                    return dados["candidates"][0]["content"]["parts"][0]["text"]
+
+                # Se o servidor estiver sobrecarregado (high demand / 429 / 503), aguarda 1.5s e tenta de novo
+                if (
+                    response.status_code in [429, 503]
+                    or "high demand" in response.text.lower()
+                ):
+                    time.sleep(1.5)
+                    continue
+
                 msg_erro = dados.get("error", {}).get("message", response.text)
                 erros_acumulados.append(f"[{modelo}]: {msg_erro}")
-        except Exception as e:
-            erros_acumulados.append(f"[{modelo}]: {str(e)}")
+                break  # Se for erro definitivo de modelo/chave, avança para o próximo modelo
 
-    raise Exception("Nenhum modelo respondeu com sucesso. Detalhes:\n" + "\n".join(erros_acumulados))
+            except Exception as e:
+                erros_acumulados.append(f"[{modelo}]: {str(e)}")
+                time.sleep(1)
+
+    raise Exception(
+        "Servidores do Google ocupados no momento. Aguarde alguns segundos e clique em Analisar novamente.\nDetalhes:\n"
+        + "\n".join(erros_acumulados)
+    )
 
 
 # Interface Principal
@@ -138,7 +155,9 @@ with tab1:
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    with st.spinner("A identificar a planta..."):
+                    with st.spinner(
+                        "A identificar a planta (aguarde alguns instantes)..."
+                    ):
                         texto_resposta = analisar_planta_api_direta(
                             imagem, api_key
                         )
@@ -179,7 +198,7 @@ with tab1:
                     st.info("✅ Dados salvos com sucesso no seu catálogo!")
 
                 except Exception as e:
-                    st.error(f"Erro ao processar imagem: {e}")
+                    st.error(f"{e}")
 
 with tab2:
     st.header("📋 Plantas Cadastradas")
