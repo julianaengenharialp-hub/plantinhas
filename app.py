@@ -66,7 +66,7 @@ with tab1:
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    # Inicialização com a biblioteca cliente oficial e modelo estável
+                    # Usando o novo cliente do SDK google-genai
                     client = genai.Client(api_key=api_key)
 
                     prompt = """
@@ -78,8 +78,9 @@ with tab1:
                     """
 
                     with st.spinner("A identificar a planta..."):
+                        # Atualizado para o modelo gemini-3.8-flash requisitado pela API
                         response = client.models.generate_content(
-                            model="gemini-2.5-flash",
+                            model="gemini-3.8-flash",
                             contents=[prompt, imagem]
                         )
                         texto_resposta = response.text
