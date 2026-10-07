@@ -30,16 +30,31 @@ CREATE TABLE IF NOT EXISTS plantas (
 conn.commit()
 
 
+def extrair_texto_da_resposta(dados):
+    """Extrai com segurança todo o texto retornado na estrutura do Gemini."""
+    try:
+        candidates = dados.get("candidates", [])
+        if not candidates:
+            return None
+
+        parts = candidates[0].get("content", {}).get("parts", [])
+        textos = []
+        for part in parts:
+            if "text" in part and part["text"].strip():
+                textos.append(part["text"].strip())
+
+        return "\n".join(textos) if textos else None
+    except Exception:
+        return None
+
+
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Converte a imagem e faz a chamada REST direta para o modelo gemini-3.8-flash."""
-    # Trata transparência (RGBA/PNG) convertendo para RGB
+    """Converte a imagem e faz a chamada REST para o modelo gemini-3.8-flash."""
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
-    # Redimensiona levemente se a foto for muito grande para acelerar o envio
     imagem_pil.thumbnail((1024, 1024))
 
-    # Converte imagem PIL para Bytes/Base64 em JPEG
     buffered = io.BytesIO()
     imagem_pil.save(buffered, format="JPEG", quality=85)
     img_bytes = buffered.getvalue()
@@ -74,19 +89,19 @@ def analisar_planta_api_direta(imagem_pil, api_key):
 
     headers = {"Content-Type": "application/json"}
 
-    # Tentativas resilientes
     for tentativa in range(3):
         try:
-            # Timeout estendido para 60s
             response = requests.post(
                 url, json=payload, headers=headers, timeout=60
             )
             dados = response.json()
 
             if response.status_code == 200:
-                return dados["candidates"][0]["content"]["parts"][0]["text"]
+                texto = extrair_texto_da_resposta(dados)
+                if texto:
+                    return texto
+                raise Exception("Resposta vazia da IA.")
 
-            # Trata sobrecarga momentânea
             if response.status_code in [429, 503] or "high demand" in response.text.lower():
                 time.sleep(2)
                 continue
@@ -98,7 +113,7 @@ def analisar_planta_api_direta(imagem_pil, api_key):
             if tentativa < 2:
                 time.sleep(2)
                 continue
-            raise Exception("O servidor do Google demorou para responder. Tente novamente em instantes.")
+            raise Exception("O servidor demorou para responder. Tente novamente em instantes.")
         except Exception as e:
             if tentativa == 2:
                 raise e
@@ -158,7 +173,6 @@ with tab1:
                     st.markdown(texto_resposta)
 
                     # Processar o texto retornado para guardar no banco de dados
-                    linhas = texto_resposta.strip().split("\n")
                     dados = {
                         "Nome Comum": "Desconhecido",
                         "Nome Científico": "Desconhecido",
@@ -166,12 +180,14 @@ with tab1:
                         "Curiosidades": "Não informado",
                     }
 
-                    for linha in linhas:
-                        if ":" in linha:
-                            chave, valor = linha.split(":", 1)
-                            chave_limpa = chave.strip()
-                            if chave_limpa in dados:
-                                dados[chave_limpa] = valor.strip()
+                    if texto_resposta:
+                        linhas = texto_resposta.strip().split("\n")
+                        for linha in linhas:
+                            if ":" in linha:
+                                chave, valor = linha.split(":", 1)
+                                chave_limpa = chave.strip()
+                                if chave_limpa in dados:
+                                    dados[chave_limpa] = valor.strip()
 
                     # Inserir no SQLite
                     cursor.execute(
@@ -195,7 +211,6 @@ with tab1:
 with tab2:
     st.header("📋 Plantas Cadastradas")
 
-    # Busca por filtro
     busca = st.text_input("Buscar por nome comum ou científico:")
 
     if busca:
