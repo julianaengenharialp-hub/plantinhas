@@ -1,8 +1,9 @@
-import time
+import base64
+import io
 import sqlite3
+import requests
 from PIL import Image
 import streamlit as st
-from google import genai
 
 # Configuração da página do Streamlit
 st.set_page_config(
@@ -27,6 +28,71 @@ CREATE TABLE IF NOT EXISTS plantas (
 )
 conn.commit()
 
+
+def analisar_planta_api_direta(imagem_pil, api_key):
+    """Função que envia a imagem diretamente via HTTP REST para o Gemini."""
+    # Converter imagem PIL para Bytes/Base64
+    buffered = io.BytesIO()
+    imagem_pil.save(buffered, format="JPEG")
+    img_bytes = buffered.getvalue()
+    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+
+    # Lista de modelos e versões para tentar em ordem
+    endpoints = [
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
+        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}",
+    ]
+
+    prompt_texto = """
+    Analise esta imagem de planta e responda estritamente no seguinte formato:
+    Nome Comum: [Nome comum da planta em português]
+    Nome Científico: [Nome científico em itálico/latim]
+    Cuidados: [Breve resumo sobre iluminação, rega e solo]
+    Curiosidades: [Fato interessante sobre a espécie]
+    """
+
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt_texto},
+                    {
+                        "inline_data": {
+                            "mime_type": "image/jpeg",
+                            "data": img_base64,
+                        }
+                    },
+                ]
+            }
+        ]
+    }
+
+    headers = {"Content-Type": "application/json"}
+
+    ultimo_erro = ""
+    for url in endpoints:
+        try:
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=30
+            )
+            dados_resposta = response.json()
+
+            if response.status_code == 200:
+                # Extrair o texto da resposta
+                return dados_resposta["candidates"][0]["content"]["parts"][0][
+                    "text"
+                ]
+            else:
+                mensagem = dados_resposta.get("error", {}).get(
+                    "message", response.text
+                )
+                ultimo_erro = f"Código {response.status_code}: {mensagem}"
+        except Exception as e:
+            ultimo_erro = str(e)
+
+    raise Exception(ultimo_erro)
+
+
 # Interface Principal
 st.title("🪴 Catálogo e Identificador de Plantas")
 st.write(
@@ -36,7 +102,9 @@ st.write(
 # Barra Lateral - Chave de API
 st.sidebar.header("Configurações")
 api_key = st.sidebar.text_input(
-    "Chave da API Gemini", type="password", help="Insira a sua chave do Google AI Studio"
+    "Chave da API Gemini",
+    type="password",
+    help="Insira a sua chave do Google AI Studio",
 )
 
 # Navegação por Abas
@@ -63,54 +131,16 @@ with tab1:
         st.image(imagem, caption="Imagem para Análise", use_column_width=True)
 
         if not api_key:
-            st.warning("Por favor, insira a sua Chave da API Gemini na barra lateral.")
+            st.warning(
+                "Por favor, insira a sua Chave da API Gemini na barra lateral."
+            )
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    client = genai.Client(api_key=api_key)
-
-                    prompt = """
-                    Analise esta imagem de planta e responda estritamente no seguinte formato:
-                    Nome Comum: [Nome comum da planta em português]
-                    Nome Científico: [Nome científico em itálico/latim]
-                    Cuidados: [Breve resumo sobre iluminação, rega e solo]
-                    Curiosidades: [Fato interessante sobre a espécie]
-                    """
-
-                    # Lista de modelos por ordem de preferência
-                    modelos_para_testar = [
-                        "gemini-2.5-flash",
-                        "gemini-1.5-flash",
-                        "gemini-3.8-flash"
-                    ]
-
-                    response = None
-                    erro_ultimo = None
-
-                    with st.spinner("A identificar a planta (aguarde uns segundos)..."):
-                        for modelo in modelos_para_testar:
-                            # Tenta até 2 vezes por modelo se houver erro 503
-                            for tentativa in range(2):
-                                try:
-                                    response = client.models.generate_content(
-                                        model=modelo,
-                                        contents=[prompt, imagem]
-                                    )
-                                    if response:
-                                        break
-                                except Exception as err:
-                                    erro_ultimo = err
-                                    if "503" in str(err) or "UNAVAILABLE" in str(err):
-                                        time.sleep(2)  # Aguarda 2 segundos antes de tentar novamente
-                                    else:
-                                        break
-                            if response:
-                                break
-
-                    if not response:
-                        raise erro_ultimo
-
-                    texto_resposta = response.text
+                    with st.spinner("A identificar a planta..."):
+                        texto_resposta = analisar_planta_api_direta(
+                            imagem, api_key
+                        )
 
                     st.success("Planta Identificada!")
                     st.markdown(texto_resposta)
