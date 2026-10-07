@@ -11,7 +11,7 @@ st.set_page_config(
     page_title="Catálogo de Plantas", page_icon="🪴", layout="centered"
 )
 
-# Inicialização do Banco de Dados SQLite
+# Inicialização do Banco de Dados SQLite com suporte a imagens
 conn = sqlite3.connect("plantas.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -23,52 +23,70 @@ CREATE TABLE IF NOT EXISTS plantas (
     nome_cientifico TEXT,
     cuidados TEXT,
     curiosidades TEXT,
+    imagem_base64 TEXT,
     data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
 )
-conn.commit()
+
+# Adiciona a coluna imagem_base64 caso a tabela já exista sem ela
+try:
+    cursor.execute("ALTER TABLE plantas ADD COLUMN imagem_base64 TEXT")
+    conn.commit()
+except sqlite3.OperationalError:
+    pass
 
 
 def extrair_texto_da_resposta(dados):
-    """Extrai com segurança todo o texto retornado na estrutura do Gemini."""
+    """Extrai texto da resposta JSON do Gemini com fallback para várias estruturas."""
     try:
         candidates = dados.get("candidates", [])
         if not candidates:
             return None
 
-        parts = candidates[0].get("content", {}).get("parts", [])
+        content = candidates[0].get("content", {})
+        parts = content.get("parts", [])
+
         textos = []
         for part in parts:
-            if "text" in part and part["text"].strip():
-                textos.append(part["text"].strip())
+            if isinstance(part, dict) and "text" in part:
+                txt = part["text"].strip()
+                if txt:
+                    textos.append(txt)
 
-        return "\n".join(textos) if textos else None
+        if textos:
+            return "\n".join(textos)
+
+        # Fallback de busca textual genérica caso a estrutura seja diferente
+        return str(dados)
     except Exception:
         return None
 
 
-def analisar_planta_api_direta(imagem_pil, api_key):
-    """Converte a imagem e faz a chamada REST para o modelo gemini-3.8-flash."""
+def converter_imagem_para_base64(imagem_pil):
+    """Converte a imagem PIL para string Base64 compacta para armazenar no SQLite."""
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
-    imagem_pil.thumbnail((1024, 1024))
-
+    imagem_pil.thumbnail((800, 800))
     buffered = io.BytesIO()
-    imagem_pil.save(buffered, format="JPEG", quality=85)
-    img_bytes = buffered.getvalue()
-    img_base64 = base64.b64encode(img_bytes).decode("utf-8")
+    imagem_pil.save(buffered, format="JPEG", quality=80)
+    return base64.b64encode(buffered.getvalue()).decode("utf-8")
+
+
+def analisar_planta_api_direta(imagem_pil, api_key):
+    """Converte a imagem e realiza a chamada à API Gemini."""
+    img_base64 = converter_imagem_para_base64(imagem_pil)
 
     modelo_ativo = "gemini-3.8-flash"
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_ativo}:generateContent?key={api_key}"
 
     prompt_texto = """
-    Analise esta imagem de planta e responda estritamente no seguinte formato:
-    Nome Comum: [Nome comum da planta em português]
-    Nome Científico: [Nome científico em itálico/latim]
-    Cuidados: [Breve resumo sobre iluminação, rega e solo]
-    Curiosidades: [Fato interessante sobre a espécie]
+    Analise esta imagem de planta e responda exatamente neste formato (mantenha os rótulos):
+    Nome Comum: [Nome comum em português]
+    Nome Científico: [Nome científico em latim]
+    Cuidados: [Resumo de rega, iluminação e solo]
+    Curiosidades: [Fato interessante sobre a planta]
     """
 
     payload = {
@@ -99,8 +117,8 @@ def analisar_planta_api_direta(imagem_pil, api_key):
             if response.status_code == 200:
                 texto = extrair_texto_da_resposta(dados)
                 if texto:
-                    return texto
-                raise Exception("Resposta vazia da IA.")
+                    return texto, img_base64
+                raise Exception("A API não retornou texto válido.")
 
             if response.status_code in [429, 503] or "high demand" in response.text.lower():
                 time.sleep(2)
@@ -113,7 +131,7 @@ def analisar_planta_api_direta(imagem_pil, api_key):
             if tentativa < 2:
                 time.sleep(2)
                 continue
-            raise Exception("O servidor demorou para responder. Tente novamente em instantes.")
+            raise Exception("O servidor demorou para responder. Tente novamente.")
         except Exception as e:
             if tentativa == 2:
                 raise e
@@ -165,15 +183,15 @@ with tab1:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
                     with st.spinner("A identificar a planta..."):
-                        texto_resposta = analisar_planta_api_direta(
+                        texto_resposta, img_b64 = analisar_planta_api_direta(
                             imagem, api_key
                         )
 
-                    st.success("Planta Identificada!")
+                    st.success("Planta Identificada com Sucesso!")
                     st.markdown(texto_resposta)
 
-                    # Processar o texto retornado para guardar no banco de dados
-                    dados = {
+                    # Leitura dos campos retornados
+                    dados_planta = {
                         "Nome Comum": "Desconhecido",
                         "Nome Científico": "Desconhecido",
                         "Cuidados": "Não informado",
@@ -181,32 +199,33 @@ with tab1:
                     }
 
                     if texto_resposta:
-                        linhas = texto_resposta.strip().split("\n")
-                        for linha in linhas:
+                        for linha in texto_resposta.split("\n"):
                             if ":" in linha:
                                 chave, valor = linha.split(":", 1)
                                 chave_limpa = chave.strip()
-                                if chave_limpa in dados:
-                                    dados[chave_limpa] = valor.strip()
+                                for k in dados_planta.keys():
+                                    if k.lower() in chave_limpa.lower():
+                                        dados_planta[k] = valor.strip()
 
-                    # Inserir no SQLite
+                    # Inserção no banco de dados SQLite com a foto em Base64
                     cursor.execute(
                         """
-                    INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades, imagem_base64)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
                         (
-                            dados["Nome Comum"],
-                            dados["Nome Científico"],
-                            dados["Cuidados"],
-                            dados["Curiosidades"],
+                            dados_planta["Nome Comum"],
+                            dados_planta["Nome Científico"],
+                            dados_planta["Cuidados"],
+                            dados_planta["Curiosidades"],
+                            img_b64,
                         ),
                     )
                     conn.commit()
-                    st.info("✅ Dados salvos com sucesso no seu catálogo!")
+                    st.info("✅ Dados e fotografia salvos com sucesso no catálogo!")
 
                 except Exception as e:
-                    st.error(f"Erro: {e}")
+                    st.error(f"Erro ao processar: {e}")
 
 with tab2:
     st.header("📋 Plantas Cadastradas")
@@ -225,9 +244,32 @@ with tab2:
 
     if registros:
         for reg in registros:
-            with st.expander(f"🪴 {reg[1]} ({reg[2]})"):
-                st.write(f"**Cuidados:** {reg[3]}")
-                st.write(f"**Curiosidades:** {reg[4]}")
-                st.caption(f"Registrado em: {reg[5]}")
+            # Estrutura do registro: (id, nome_comum, nome_cientifico, cuidados, curiosidades, imagem_base64, data_registro)
+            nome_comum = reg[1] if reg[1] else "Desconhecido"
+            nome_cientifico = reg[2] if reg[2] else "Desconhecido"
+            cuidados = reg[3] if reg[3] else "Não informado"
+            curiosidades = reg[4] if reg[4] else "Não informado"
+            img_b64 = reg[5] if len(reg) > 5 else None
+            data_reg = reg[6] if len(reg) > 6 else (reg[5] if len(reg) > 5 and not img_b64 else "")
+
+            with st.expander(f"🪴 {nome_comum} ({nome_cientifico})"):
+                col1, col2 = st.columns([1, 2])
+
+                with col1:
+                    if img_b64 and len(img_b64) > 100:
+                        try:
+                            img_bytes = base64.b64decode(img_b64)
+                            img_display = Image.open(io.BytesIO(img_bytes))
+                            st.image(img_display, use_column_width=True)
+                        except Exception:
+                            st.caption("📷 Imagem não disponível")
+                    else:
+                        st.caption("📷 Sem fotografia cadastrada")
+
+                with col2:
+                    st.write(f"**Cuidados:** {cuidados}")
+                    st.write(f"**Curiosidades:** {curiosidades}")
+                    if data_reg:
+                        st.caption(f"Registado em: {data_reg}")
     else:
         st.write("Nenhuma planta cadastrada ainda.")
