@@ -41,12 +41,11 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-    # Lista de modelos ordenada da melhor opção para os backups universais
+    # Lista de modelos atualizada conforme recomendação exata da API
     modelos_para_testar = [
-        "gemini-2.5-flash",
-        "gemini-1.5-flash",
+        "gemini-3.8-flash",
         "gemini-3.1-pro-preview",
-        "gemini-2.5-pro",
+        "gemini-2.5-flash",
     ]
 
     prompt_texto = """
@@ -76,7 +75,6 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     headers = {"Content-Type": "application/json"}
     erros_acumulados = []
 
-    # Testa os modelos em sequência até encontrar um ativo na sua chave
     for modelo in modelos_para_testar:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
         try:
@@ -86,7 +84,6 @@ def analisar_planta_api_direta(imagem_pil, api_key):
             dados = response.json()
 
             if response.status_code == 200:
-                # Sucesso! Retorna o texto gerado
                 return dados["candidates"][0]["content"]["parts"][0]["text"]
             else:
                 msg_erro = dados.get("error", {}).get("message", response.text)
@@ -94,8 +91,7 @@ def analisar_planta_api_direta(imagem_pil, api_key):
         except Exception as e:
             erros_acumulados.append(f"[{modelo}]: {str(e)}")
 
-    # Se nenhum modelo funcionou, lança os detalhes
-    raise Exception("Nenhum modelo respondeu com sucesso. Detalhes:\n" + "\n".join(erros_acumulados[:2]))
+    raise Exception("Nenhum modelo respondeu com sucesso. Detalhes:\n" + "\n".join(erros_acumulados))
 
 
 # Interface Principal
