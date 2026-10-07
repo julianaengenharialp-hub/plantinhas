@@ -31,22 +31,22 @@ conn.commit()
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Converte a imagem e faz requisições resilientes aos modelos flash com retry automático."""
-    # Trata transparência (RGBA/PNG) convertendo para RGB/JPEG
+    """Converte a imagem e faz a chamada REST direta para o modelo gemini-3.8-flash."""
+    # Trata transparência (RGBA/PNG) convertendo para RGB
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
-    # Converte imagem PIL para Bytes/Base64
+    # Redimensiona levemente se a foto for muito grande para acelerar o envio
+    imagem_pil.thumbnail((1024, 1024))
+
+    # Converte imagem PIL para Bytes/Base64 em JPEG
     buffered = io.BytesIO()
-    imagem_pil.save(buffered, format="JPEG")
+    imagem_pil.save(buffered, format="JPEG", quality=85)
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-    # Modelos flash leves e compatíveis com a chave gratuita
-    modelos_para_testar = [
-        "gemini-3.8-flash",
-        "gemini-1.5-flash-8b",
-    ]
+    modelo_ativo = "gemini-3.8-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_ativo}:generateContent?key={api_key}"
 
     prompt_texto = """
     Analise esta imagem de planta e responda estritamente no seguinte formato:
@@ -73,42 +73,36 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     }
 
     headers = {"Content-Type": "application/json"}
-    erros_acumulados = []
 
-    for modelo in modelos_para_testar:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
+    # Tentativas resilientes
+    for tentativa in range(3):
+        try:
+            # Timeout estendido para 60s
+            response = requests.post(
+                url, json=payload, headers=headers, timeout=60
+            )
+            dados = response.json()
 
-        # Tenta até 3 vezes por modelo em caso de pico temporário no servidor
-        for tentativa in range(3):
-            try:
-                response = requests.post(
-                    url, json=payload, headers=headers, timeout=25
-                )
-                dados = response.json()
+            if response.status_code == 200:
+                return dados["candidates"][0]["content"]["parts"][0]["text"]
 
-                if response.status_code == 200:
-                    return dados["candidates"][0]["content"]["parts"][0]["text"]
+            # Trata sobrecarga momentânea
+            if response.status_code in [429, 503] or "high demand" in response.text.lower():
+                time.sleep(2)
+                continue
 
-                # Se o servidor estiver sobrecarregado (high demand / 429 / 503), aguarda 1.5s e tenta de novo
-                if (
-                    response.status_code in [429, 503]
-                    or "high demand" in response.text.lower()
-                ):
-                    time.sleep(1.5)
-                    continue
+            msg_erro = dados.get("error", {}).get("message", response.text)
+            raise Exception(f"Erro {response.status_code}: {msg_erro}")
 
-                msg_erro = dados.get("error", {}).get("message", response.text)
-                erros_acumulados.append(f"[{modelo}]: {msg_erro}")
-                break  # Se for erro definitivo de modelo/chave, avança para o próximo modelo
-
-            except Exception as e:
-                erros_acumulados.append(f"[{modelo}]: {str(e)}")
-                time.sleep(1)
-
-    raise Exception(
-        "Servidores do Google ocupados no momento. Aguarde alguns segundos e clique em Analisar novamente.\nDetalhes:\n"
-        + "\n".join(erros_acumulados)
-    )
+        except requests.exceptions.Timeout:
+            if tentativa < 2:
+                time.sleep(2)
+                continue
+            raise Exception("O servidor do Google demorou para responder. Tente novamente em instantes.")
+        except Exception as e:
+            if tentativa == 2:
+                raise e
+            time.sleep(1)
 
 
 # Interface Principal
@@ -155,9 +149,7 @@ with tab1:
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    with st.spinner(
-                        "A identificar a planta (aguarde alguns instantes)..."
-                    ):
+                    with st.spinner("A identificar a planta..."):
                         texto_resposta = analisar_planta_api_direta(
                             imagem, api_key
                         )
@@ -198,7 +190,7 @@ with tab1:
                     st.info("✅ Dados salvos com sucesso no seu catálogo!")
 
                 except Exception as e:
-                    st.error(f"{e}")
+                    st.error(f"Erro: {e}")
 
 with tab2:
     st.header("📋 Plantas Cadastradas")
