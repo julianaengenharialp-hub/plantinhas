@@ -30,14 +30,17 @@ conn.commit()
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Função que envia a imagem diretamente via HTTP REST para o Gemini."""
+    """Função que converte a imagem e envia via HTTP REST para o Gemini."""
+    # Converter RGBA/PNG com transparência para RGB
+    if imagem_pil.mode in ("RGBA", "P"):
+        imagem_pil = imagem_pil.convert("RGB")
+
     # Converter imagem PIL para Bytes/Base64
     buffered = io.BytesIO()
     imagem_pil.save(buffered, format="JPEG")
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-    # Lista de modelos e versões para tentar em ordem
     endpoints = [
         f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}",
         f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key={api_key}",
@@ -78,7 +81,6 @@ def analisar_planta_api_direta(imagem_pil, api_key):
             dados_resposta = response.json()
 
             if response.status_code == 200:
-                # Extrair o texto da resposta
                 return dados_resposta["candidates"][0]["content"]["parts"][0][
                     "text"
                 ]
