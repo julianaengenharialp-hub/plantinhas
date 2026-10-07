@@ -1,21 +1,17 @@
 # ============================================================
-# CATÁLOGO DE PLANTAS
-# Versão: 0.2
-# Etapa 1: Identificação + análise + conferência
+# MEU CATÁLOGO DE PLANTAS
+# Versão 0.3
+# Etapa 1.2 - Identificação com Pl@ntNet
 # ============================================================
 
-import base64
 import io
-import json
-import sqlite3
 import requests
-
 from PIL import Image
 import streamlit as st
 
 
 # ============================================================
-# CONFIGURAÇÃO DO STREAMLIT
+# CONFIGURAÇÃO
 # ============================================================
 
 st.set_page_config(
@@ -26,436 +22,167 @@ st.set_page_config(
 
 
 # ============================================================
-# BANCO DE DADOS TEMPORÁRIO
-#
-# Por enquanto mantemos o SQLite apenas para preservar
-# compatibilidade com a versão anterior.
-# Nas próximas etapas migraremos para banco permanente.
+# FUNÇÃO DE IDENTIFICAÇÃO
 # ============================================================
 
-conn = sqlite3.connect(
-    "plantas.db",
-    check_same_thread=False
-)
-
-cursor = conn.cursor()
-
-cursor.execute(
+def identificar_planta_plantnet(imagem_pil):
     """
-    CREATE TABLE IF NOT EXISTS plantas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome_comum TEXT,
-        nome_cientifico TEXT,
-        cuidados TEXT,
-        curiosidades TEXT,
-        imagem_base64 TEXT,
-        data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """
-)
-
-conn.commit()
-
-
-# ============================================================
-# FUNÇÕES AUXILIARES
-# ============================================================
-
-def converter_imagem_para_base64(imagem_pil):
-    """
-    Redimensiona e converte a imagem para JPEG em Base64.
+    Envia a fotografia para a API do Pl@ntNet e retorna
+    as identificações mais prováveis.
     """
 
-    imagem_copia = imagem_pil.copy()
+    try:
+        api_key = st.secrets["PLANTNET_API_KEY"]
+    except KeyError:
+        raise Exception(
+            "A chave do Pl@ntNet não foi encontrada nos Secrets "
+            "do Streamlit."
+        )
 
-    if imagem_copia.mode not in ("RGB",):
-        imagem_copia = imagem_copia.convert("RGB")
+    # --------------------------------------------------------
+    # PREPARAR IMAGEM
+    # --------------------------------------------------------
 
-    imagem_copia.thumbnail((1000, 1000))
+    imagem = imagem_pil.copy()
 
-    buffered = io.BytesIO()
+    if imagem.mode != "RGB":
+        imagem = imagem.convert("RGB")
 
-    imagem_copia.save(
-        buffered,
+    # Evita enviar fotografias gigantes sem necessidade
+    imagem.thumbnail((1600, 1600))
+
+    buffer = io.BytesIO()
+
+    imagem.save(
+        buffer,
         format="JPEG",
-        quality=85
+        quality=90
     )
 
-    return base64.b64encode(
-        buffered.getvalue()
-    ).decode("utf-8")
+    buffer.seek(0)
 
-
-def extrair_texto_da_resposta(dados):
-    """
-    Extrai o conteúdo textual retornado pela API do Gemini.
-    """
-
-    if not isinstance(dados, dict):
-        return None
-
-    candidates = dados.get("candidates", [])
-
-    if not candidates:
-        return None
-
-    for candidate in candidates:
-
-        content = candidate.get("content", {})
-        parts = content.get("parts", [])
-
-        for part in parts:
-
-            if (
-                isinstance(part, dict)
-                and "text" in part
-            ):
-                return part["text"].strip()
-
-    return None
-
-
-# ============================================================
-# ANÁLISE DA PLANTA
-# ============================================================
-
-def analisar_planta(imagem_pil, api_key):
-
-    imagem_base64 = converter_imagem_para_base64(
-        imagem_pil
-    )
-
-    modelo = "gemini-3.8-flash"
+    # --------------------------------------------------------
+    # ENDPOINT DO PL@NTNET
+    # --------------------------------------------------------
 
     url = (
-        "https://generativelanguage.googleapis.com/"
-        f"v1beta/models/{modelo}:generateContent"
-        f"?key={api_key}"
+        "https://my-api.plantnet.org/v2/identify/all"
     )
 
-    prompt = """
-Você atua como assistente para identificação visual de plantas.
-
-Analise cuidadosamente SOMENTE a planta visível na fotografia.
-
-O objetivo é auxiliar o usuário a identificar uma planta doméstica
-e posteriormente catalogá-la.
-
-REGRAS IMPORTANTES:
-
-1. Não invente informações para completar campos.
-
-2. Quando uma informação não puder ser determinada com segurança,
-use exatamente:
-"Não determinado com segurança"
-
-3. A identificação feita por fotografia não deve ser apresentada
-como confirmação botânica definitiva.
-
-4. Informe um percentual de 0 a 100 representando SUA CONFIANÇA
-ESTIMADA na identificação visual.
-
-Esse percentual é uma autoavaliação da identificação e não uma
-probabilidade científica ou estatisticamente calibrada.
-
-5. Considere características realmente visíveis na fotografia,
-como:
-- formato das folhas;
-- coloração;
-- nervuras;
-- disposição das folhas;
-- caule;
-- padrão de crescimento;
-- flores;
-- frutos;
-- outras características morfológicas observáveis.
-
-Não diga que observou uma característica que não esteja visível.
-
-6. Se houver outra espécie ou gênero visualmente semelhante,
-informe como identificação alternativa.
-
-7. Para o grupo de luminosidade escolha EXATAMENTE UMA destas
-três categorias:
-
-Sol pleno
-Luz indireta
-Pouca luz
-
-Critérios gerais:
-
-SOL PLENO:
-plantas cujo cultivo normalmente requer ou se beneficia de várias
-horas de incidência direta de sol.
-
-LUZ INDIRETA:
-plantas normalmente cultivadas em ambiente claro, mas protegidas
-da incidência direta intensa durante grande parte do dia.
-
-POUCA LUZ:
-plantas capazes de tolerar ambientes com menor intensidade de
-luz natural.
-
-"Pouca luz" nunca significa ausência completa de luz.
-
-Escolha a categoria que melhor representa a condição recomendada
-para cultivo doméstico da planta identificada.
-
-8. As recomendações de cultivo devem ser compatíveis com a
-identificação realizada.
-
-9. Caso a identificação esteja muito incerta, não apresente
-cuidados altamente específicos como fatos.
-
-10. Se fotografias adicionais puderem melhorar a identificação,
-informe isso e explique quais partes da planta deveriam ser
-fotografadas.
-
-11. Curiosidades somente devem ser apresentadas quando você
-tiver segurança razoável sobre a informação.
-
-12. Para toxicidade, não presuma segurança.
-Se não houver segurança suficiente, responda:
-"Não determinado com segurança"
-
-13. Nome científico deve ser informado somente quando houver
-base suficiente para determinar pelo menos a espécie ou gênero.
-
-14. Diferencie claramente aquilo que consegue observar na imagem
-daquilo que está inferindo com base na identificação provável.
-"""
-
-    esquema = {
-        "type": "object",
-        "properties": {
-
-            "nome_comum": {
-                "type": "string"
-            },
-
-            "nome_cientifico": {
-                "type": "string"
-            },
-
-            "familia": {
-                "type": "string"
-            },
-
-            "grupo_luminosidade": {
-                "type": "string",
-                "enum": [
-                    "Sol pleno",
-                    "Luz indireta",
-                    "Pouca luz"
-                ]
-            },
-
-            "confianca": {
-                "type": "integer",
-                "minimum": 0,
-                "maximum": 100
-            },
-
-            "caracteristicas_observadas": {
-                "type": "array",
-                "items": {
-                    "type": "string"
-                }
-            },
-
-            "identificacoes_alternativas": {
-                "type": "array",
-                "items": {
-                    "type": "string"
-                }
-            },
-
-            "luminosidade": {
-                "type": "string"
-            },
-
-            "rega": {
-                "type": "string"
-            },
-
-            "substrato": {
-                "type": "string"
-            },
-
-            "umidade": {
-                "type": "string"
-            },
-
-            "toxicidade": {
-                "type": "string"
-            },
-
-            "porte": {
-                "type": "string"
-            },
-
-            "curiosidades": {
-                "type": "string"
-            },
-
-            "observacoes": {
-                "type": "string"
-            },
-
-            "precisa_mais_fotos": {
-                "type": "boolean"
-            },
-
-            "fotos_recomendadas": {
-                "type": "array",
-                "items": {
-                    "type": "string"
-                }
-            }
-        },
-
-        "required": [
-            "nome_comum",
-            "nome_cientifico",
-            "familia",
-            "grupo_luminosidade",
-            "confianca",
-            "caracteristicas_observadas",
-            "identificacoes_alternativas",
-            "luminosidade",
-            "rega",
-            "substrato",
-            "umidade",
-            "toxicidade",
-            "porte",
-            "curiosidades",
-            "observacoes",
-            "precisa_mais_fotos",
-            "fotos_recomendadas"
-        ]
+    params = {
+        "api-key": api_key,
+        "lang": "pt"
     }
 
-    payload = {
+    files = [
+        (
+            "images",
+            (
+                "planta.jpg",
+                buffer.getvalue(),
+                "image/jpeg"
+            )
+        )
+    ]
 
-        "contents": [
-            {
-                "parts": [
-
-                    {
-                        "text": prompt
-                    },
-
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": imagem_base64
-                        }
-                    }
-                ]
-            }
-        ],
-
-        "generationConfig": {
-
-            "responseMimeType": "application/json",
-
-            "responseSchema": esquema,
-
-            # Queremos comportamento conservador,
-            # não criatividade.
-            "temperature": 0.1
-        }
+    data = {
+        "organs": "auto"
     }
+
+    # --------------------------------------------------------
+    # REQUISIÇÃO
+    # --------------------------------------------------------
 
     try:
 
-        response = requests.post(
+        resposta = requests.post(
             url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json"
-            },
+            params=params,
+            files=files,
+            data=data,
             timeout=60
         )
 
     except requests.exceptions.Timeout:
 
         raise Exception(
-            "O serviço de identificação demorou demais "
-            "para responder. Tente novamente mais tarde."
+            "O Pl@ntNet demorou demais para responder. "
+            "Tente novamente."
         )
 
     except requests.exceptions.ConnectionError:
 
         raise Exception(
-            "Não foi possível conectar ao serviço "
-            "de identificação."
+            "Não foi possível conectar ao Pl@ntNet."
         )
+
+    # --------------------------------------------------------
+    # TRATAMENTO DOS ERROS
+    # --------------------------------------------------------
+
+    if resposta.status_code == 401:
+
+        raise Exception(
+            "O Pl@ntNet não aceitou a chave da API. "
+            "Verifique se a chave foi salva corretamente "
+            "nos Secrets do Streamlit."
+        )
+
+    if resposta.status_code == 404:
+
+        raise Exception(
+            "O serviço de identificação do Pl@ntNet "
+            "não foi encontrado."
+        )
+
+    if resposta.status_code == 429:
+
+        raise Exception(
+            "O limite de identificações disponível no "
+            "Pl@ntNet foi atingido."
+        )
+
+    if resposta.status_code >= 500:
+
+        raise Exception(
+            "O Pl@ntNet está temporariamente indisponível. "
+            "Tente novamente mais tarde."
+        )
+
+    if resposta.status_code != 200:
+
+        try:
+            detalhe = resposta.json()
+        except Exception:
+            detalhe = resposta.text
+
+        raise Exception(
+            f"O Pl@ntNet retornou o erro "
+            f"{resposta.status_code}: {detalhe}"
+        )
+
+    # --------------------------------------------------------
+    # INTERPRETAR RESPOSTA
+    # --------------------------------------------------------
 
     try:
+        dados = resposta.json()
+    except Exception:
+        raise Exception(
+            "O Pl@ntNet respondeu, mas o aplicativo "
+            "não conseguiu interpretar a resposta."
+        )
 
-        dados = response.json()
+    resultados = dados.get("results", [])
 
-    except ValueError:
+    if not resultados:
 
         raise Exception(
-            "O serviço retornou uma resposta que o "
-            "aplicativo não conseguiu interpretar."
+            "O Pl@ntNet não encontrou uma identificação "
+            "compatível com esta fotografia."
         )
 
-    # --------------------------------------------------------
-    # TRATAMENTO DO ERRO DE COTA
-    # --------------------------------------------------------
-
-    if response.status_code == 429:
-
-        raise Exception(
-            "O limite disponível de análises do Gemini "
-            "foi atingido. Aguarde a renovação da cota "
-            "antes de realizar uma nova identificação."
-        )
-
-    # --------------------------------------------------------
-    # OUTROS ERROS
-    # --------------------------------------------------------
-
-    if response.status_code != 200:
-
-        mensagem = (
-            dados
-            .get("error", {})
-            .get(
-                "message",
-                "Erro desconhecido."
-            )
-        )
-
-        raise Exception(
-            f"Erro do serviço de identificação "
-            f"({response.status_code}): {mensagem}"
-        )
-
-    texto = extrair_texto_da_resposta(dados)
-
-    if not texto:
-
-        raise Exception(
-            "A inteligência artificial respondeu, mas "
-            "não forneceu uma identificação utilizável."
-        )
-
-    try:
-
-        resultado = json.loads(texto)
-
-    except json.JSONDecodeError:
-
-        raise Exception(
-            "A resposta recebida não pôde ser "
-            "interpretada corretamente."
-        )
-
-    return resultado, imagem_base64
+    return dados
 
 
 # ============================================================
@@ -465,30 +192,13 @@ daquilo que está inferindo com base na identificação provável.
 st.title("🪴 Meu Catálogo de Plantas")
 
 st.write(
-    "Fotografe ou envie a imagem de uma planta para "
-    "receber uma sugestão de identificação."
+    "Envie uma fotografia para obter sugestões de "
+    "identificação botânica."
 )
 
 st.caption(
-    "Nenhuma identificação será adicionada automaticamente "
-    "ao seu catálogo."
-)
-
-
-# ============================================================
-# CONFIGURAÇÕES
-# ============================================================
-
-st.sidebar.header("Configurações")
-
-api_key = st.sidebar.text_input(
-    "Chave da API Gemini",
-    type="password",
-    help=(
-        "Use a chave criada no Google AI Studio. "
-        "Em uma etapa posterior ela ficará armazenada "
-        "de forma segura."
-    )
+    "A identificação é realizada pelo Pl@ntNet e ainda "
+    "não será adicionada automaticamente ao catálogo."
 )
 
 
@@ -505,12 +215,12 @@ tab_identificar, tab_catalogo = st.tabs(
 
 
 # ============================================================
-# ABA IDENTIFICAR
+# IDENTIFICAR
 # ============================================================
 
 with tab_identificar:
 
-    st.subheader("Identificar uma planta")
+    st.subheader("Fotografia da planta")
 
     origem = st.radio(
         "Como deseja enviar a fotografia?",
@@ -520,7 +230,7 @@ with tab_identificar:
         ]
     )
 
-    imagem = None
+    arquivo = None
 
     if origem == "Tirar foto":
 
@@ -539,7 +249,9 @@ with tab_identificar:
             ]
         )
 
-    if arquivo:
+    imagem = None
+
+    if arquivo is not None:
 
         try:
 
@@ -554,67 +266,54 @@ with tab_identificar:
         except Exception:
 
             st.error(
-                "Não foi possível abrir esta imagem."
+                "Não foi possível abrir a fotografia."
             )
 
-            imagem = None
-
     # --------------------------------------------------------
-    # BOTÃO DE ANÁLISE
+    # IDENTIFICAR
     # --------------------------------------------------------
 
     if imagem is not None:
 
-        if not api_key:
+        if st.button(
+            "🔎 Identificar planta",
+            type="primary"
+        ):
 
-            st.warning(
-                "Informe sua chave da API Gemini "
-                "na barra lateral para realizar a análise."
-            )
+            try:
 
-        else:
+                with st.spinner(
+                    "Comparando sua planta com a base "
+                    "botânica do Pl@ntNet..."
+                ):
 
-            if st.button(
-                "✨ Identificar planta",
-                type="primary"
-            ):
+                    dados = identificar_planta_plantnet(
+                        imagem
+                    )
 
-                try:
+                st.session_state[
+                    "resultado_plantnet"
+                ] = dados
 
-                    with st.spinner(
-                        "Observando folhas, caule e "
-                        "outras características..."
-                    ):
+            except Exception as erro:
 
-                        resultado, imagem_b64 = (
-                            analisar_planta(
-                                imagem,
-                                api_key
-                            )
-                        )
-
-                    st.session_state[
-                        "analise_planta"
-                    ] = resultado
-
-                    st.session_state[
-                        "imagem_analise"
-                    ] = imagem_b64
-
-                except Exception as erro:
-
-                    st.error(str(erro))
+                st.error(str(erro))
 
 
     # ========================================================
-    # RESULTADO DA ANÁLISE
+    # RESULTADO
     # ========================================================
 
-    if "analise_planta" in st.session_state:
+    if "resultado_plantnet" in st.session_state:
 
-        resultado = st.session_state[
-            "analise_planta"
+        dados = st.session_state[
+            "resultado_plantnet"
         ]
+
+        resultados = dados.get(
+            "results",
+            []
+        )
 
         st.divider()
 
@@ -622,311 +321,240 @@ with tab_identificar:
             "Resultado da identificação"
         )
 
-        nome_comum = resultado.get(
-            "nome_comum",
-            "Não determinado com segurança"
-        )
+        if resultados:
 
-        nome_cientifico = resultado.get(
-            "nome_cientifico",
-            "Não determinado com segurança"
-        )
+            principal = resultados[0]
 
-        familia = resultado.get(
-            "familia",
-            "Não determinado com segurança"
-        )
-
-        grupo = resultado.get(
-            "grupo_luminosidade",
-            "Não determinado com segurança"
-        )
-
-        confianca = resultado.get(
-            "confianca",
-            0
-        )
-
-        # Garantia adicional para evitar
-        # valores inválidos no componente visual.
-
-        try:
-            confianca = int(confianca)
-        except (TypeError, ValueError):
-            confianca = 0
-
-        confianca = max(
-            0,
-            min(
-                confianca,
-                100
-            )
-        )
-
-        # ----------------------------------------------------
-        # IDENTIFICAÇÃO PRINCIPAL
-        # ----------------------------------------------------
-
-        st.subheader(nome_comum)
-
-        if (
-            nome_cientifico
-            != "Não determinado com segurança"
-        ):
-
-            st.markdown(
-                f"*{nome_cientifico}*"
+            especie = principal.get(
+                "species",
+                {}
             )
 
-        st.write(
-            f"**Família botânica:** {familia}"
-        )
-
-        st.write(
-            f"**Grupo:** {grupo}"
-        )
-
-        # ----------------------------------------------------
-        # CONFIANÇA
-        # ----------------------------------------------------
-
-        st.write(
-            "**Confiança estimada da identificação**"
-        )
-
-        st.progress(
-            confianca / 100
-        )
-
-        st.write(
-            f"**{confianca}%**"
-        )
-
-        if confianca >= 80:
-
-            st.success(
-                "Confiança estimada alta. "
-                "Ainda assim, confira a identificação "
-                "antes de adicioná-la ao catálogo."
+            score = principal.get(
+                "score",
+                0
             )
 
-        elif confianca >= 60:
-
-            st.warning(
-                "Confiança estimada moderada. "
-                "É recomendável conferir a identificação."
+            nome_cientifico = especie.get(
+                "scientificNameWithoutAuthor"
             )
 
-        else:
+            if not nome_cientifico:
 
-            st.error(
-                "Confiança estimada baixa. "
-                "Recomendamos obter mais evidências "
-                "antes de confirmar a espécie."
-            )
-
-        st.caption(
-            "Este percentual representa uma estimativa "
-            "do próprio modelo sobre a identificação "
-            "visual. Não corresponde a uma confirmação "
-            "botânica ou probabilidade estatística."
-        )
-
-        # ----------------------------------------------------
-        # EVIDÊNCIAS VISUAIS
-        # ----------------------------------------------------
-
-        st.subheader(
-            "🔎 Características observadas"
-        )
-
-        caracteristicas = resultado.get(
-            "caracteristicas_observadas",
-            []
-        )
-
-        if caracteristicas:
-
-            for item in caracteristicas:
-
-                st.write(
-                    f"• {item}"
+                nome_cientifico = especie.get(
+                    "scientificName",
+                    "Não determinado"
                 )
 
-        else:
-
-            st.write(
-                "Não foram informadas características "
-                "visuais conclusivas."
-            )
-
-        # ----------------------------------------------------
-        # IDENTIFICAÇÕES ALTERNATIVAS
-        # ----------------------------------------------------
-
-        alternativas = resultado.get(
-            "identificacoes_alternativas",
-            []
-        )
-
-        if alternativas:
-
-            st.subheader(
-                "Outras identificações possíveis"
-            )
-
-            for alternativa in alternativas:
-
-                st.write(
-                    f"• {alternativa}"
-                )
-
-        # ----------------------------------------------------
-        # CULTIVO
-        # ----------------------------------------------------
-
-        st.subheader(
-            "🌱 Orientações de cultivo"
-        )
-
-        st.write(
-            "**Luminosidade:** "
-            + resultado.get(
-                "luminosidade",
-                "Não determinado com segurança"
-            )
-        )
-
-        st.write(
-            "**Rega:** "
-            + resultado.get(
-                "rega",
-                "Não determinado com segurança"
-            )
-        )
-
-        st.write(
-            "**Substrato:** "
-            + resultado.get(
-                "substrato",
-                "Não determinado com segurança"
-            )
-        )
-
-        st.write(
-            "**Umidade:** "
-            + resultado.get(
-                "umidade",
-                "Não determinado com segurança"
-            )
-        )
-
-        st.write(
-            "**Porte:** "
-            + resultado.get(
-                "porte",
-                "Não determinado com segurança"
-            )
-        )
-
-        st.write(
-            "**Toxicidade:** "
-            + resultado.get(
-                "toxicidade",
-                "Não determinado com segurança"
-            )
-        )
-
-        # ----------------------------------------------------
-        # CURIOSIDADES
-        # ----------------------------------------------------
-
-        curiosidades = resultado.get(
-            "curiosidades",
-            ""
-        )
-
-        if (
-            curiosidades
-            and curiosidades
-            != "Não determinado com segurança"
-        ):
-
-            st.subheader(
-                "💡 Curiosidades"
-            )
-
-            st.write(
-                curiosidades
-            )
-
-        # ----------------------------------------------------
-        # OBSERVAÇÕES
-        # ----------------------------------------------------
-
-        observacoes = resultado.get(
-            "observacoes",
-            ""
-        )
-
-        if observacoes:
-
-            st.subheader(
-                "📝 Observações"
-            )
-
-            st.write(
-                observacoes
-            )
-
-        # ----------------------------------------------------
-        # MAIS FOTOS
-        # ----------------------------------------------------
-
-        precisa_mais_fotos = resultado.get(
-            "precisa_mais_fotos",
-            False
-        )
-
-        if precisa_mais_fotos:
-
-            st.warning(
-                "Fotografias adicionais podem ajudar "
-                "a melhorar a identificação."
-            )
-
-            fotos_recomendadas = resultado.get(
-                "fotos_recomendadas",
+            nomes_comuns = especie.get(
+                "commonNames",
                 []
             )
 
-            if fotos_recomendadas:
+            genero = especie.get(
+                "genus",
+                {}
+            ).get(
+                "scientificNameWithoutAuthor",
+                ""
+            )
 
-                st.write(
-                    "**Tente fotografar:**"
+            familia = especie.get(
+                "family",
+                {}
+            ).get(
+                "scientificNameWithoutAuthor",
+                ""
+            )
+
+            # ------------------------------------------------
+            # IDENTIFICAÇÃO PRINCIPAL
+            # ------------------------------------------------
+
+            if nomes_comuns:
+
+                st.subheader(
+                    nomes_comuns[0]
                 )
 
-                for sugestao in fotos_recomendadas:
+            st.markdown(
+                f"### *{nome_cientifico}*"
+            )
+
+            if familia:
+
+                st.write(
+                    f"**Família:** {familia}"
+                )
+
+            if genero:
+
+                st.write(
+                    f"**Gênero:** {genero}"
+                )
+
+            # ------------------------------------------------
+            # SCORE
+            # ------------------------------------------------
+
+            percentual = round(
+                score * 100,
+                1
+            )
+
+            st.write(
+                "**Compatibilidade da identificação**"
+            )
+
+            st.progress(
+                max(
+                    0.0,
+                    min(
+                        float(score),
+                        1.0
+                    )
+                )
+            )
+
+            st.write(
+                f"**{percentual}%**"
+            )
+
+            st.caption(
+                "Este valor é o score retornado pelo "
+                "Pl@ntNet para esta identificação. "
+                "Ele não deve ser interpretado como "
+                "confirmação botânica absoluta."
+            )
+
+            # ------------------------------------------------
+            # AVALIAÇÃO VISUAL DO SCORE
+            # ------------------------------------------------
+
+            if score >= 0.70:
+
+                st.success(
+                    "A identificação apresentou "
+                    "compatibilidade relativamente alta."
+                )
+
+            elif score >= 0.40:
+
+                st.warning(
+                    "A identificação apresentou "
+                    "compatibilidade intermediária. "
+                    "Vale conferir as alternativas abaixo."
+                )
+
+            else:
+
+                st.error(
+                    "A identificação apresentou "
+                    "compatibilidade baixa. "
+                    "Recomendamos outras fotografias "
+                    "antes de confirmar a espécie."
+                )
+
+            # ------------------------------------------------
+            # OUTROS NOMES COMUNS
+            # ------------------------------------------------
+
+            if len(nomes_comuns) > 1:
+
+                st.write(
+                    "**Outros nomes comuns informados "
+                    "pelo Pl@ntNet:**"
+                )
+
+                for nome in nomes_comuns[1:]:
 
                     st.write(
-                        f"• {sugestao}"
+                        f"• {nome}"
                     )
 
-        # ----------------------------------------------------
-        # AVISO FINAL
-        # ----------------------------------------------------
+            # ------------------------------------------------
+            # ALTERNATIVAS
+            # ------------------------------------------------
 
-        st.info(
-            "Esta análise ainda NÃO foi adicionada "
-            "ao seu catálogo. Nas próximas etapas você "
-            "poderá revisar as informações e decidir "
-            "se deseja mantê-la pendente ou confirmar "
-            "o cadastro."
-        )
+            st.subheader(
+                "🔎 Outras identificações possíveis"
+            )
+
+            alternativas_exibidas = 0
+
+            for resultado in resultados[1:5]:
+
+                especie_alt = resultado.get(
+                    "species",
+                    {}
+                )
+
+                nome_alt = especie_alt.get(
+                    "scientificNameWithoutAuthor"
+                )
+
+                if not nome_alt:
+
+                    nome_alt = especie_alt.get(
+                        "scientificName",
+                        "Espécie não determinada"
+                    )
+
+                score_alt = resultado.get(
+                    "score",
+                    0
+                )
+
+                percentual_alt = round(
+                    score_alt * 100,
+                    1
+                )
+
+                nomes_alt = especie_alt.get(
+                    "commonNames",
+                    []
+                )
+
+                if nomes_alt:
+
+                    st.write(
+                        f"**{nomes_alt[0]}** — "
+                        f"*{nome_alt}* — "
+                        f"{percentual_alt}%"
+                    )
+
+                else:
+
+                    st.write(
+                        f"*{nome_alt}* — "
+                        f"{percentual_alt}%"
+                    )
+
+                alternativas_exibidas += 1
+
+            if alternativas_exibidas == 0:
+
+                st.write(
+                    "Nenhuma alternativa relevante "
+                    "foi retornada."
+                )
+
+            # ------------------------------------------------
+            # AVISO
+            # ------------------------------------------------
+
+            st.divider()
+
+            st.info(
+                "Esta identificação ainda não foi "
+                "adicionada ao seu catálogo. "
+                "Primeiro estamos validando o sistema "
+                "de reconhecimento."
+            )
 
 
 # ============================================================
-# ABA CATÁLOGO
+# CATÁLOGO
 # ============================================================
 
 with tab_catalogo:
@@ -936,13 +564,12 @@ with tab_catalogo:
     )
 
     st.info(
-        "Nesta etapa ainda não estamos gravando novas "
-        "identificações. Primeiro estamos validando "
-        "o sistema de reconhecimento e conferência."
+        "O cadastro será ativado depois que validarmos "
+        "a identificação pelo Pl@ntNet."
     )
 
     st.subheader(
-        "Como o catálogo será organizado"
+        "Grupos do catálogo"
     )
 
     st.write(
@@ -960,18 +587,18 @@ with tab_catalogo:
     st.divider()
 
     st.write(
-        "Na próxima etapa também teremos:"
+        "Também teremos:"
     )
 
     st.write(
-        "⏳ **Pendentes** — plantas aguardando sua conferência"
+        "⏳ **Pendentes** — aguardando sua conferência"
     )
 
     st.write(
-        "📦 **Arquivadas** — plantas que já fizeram parte "
-        "da coleção"
+        "📦 **Arquivadas** — plantas que já fizeram "
+        "parte da coleção"
     )
 
     st.write(
-        "🗑️ **Excluir** — remoção definitiva do registro"
+        "🗑️ **Excluir** — remoção definitiva"
     )
