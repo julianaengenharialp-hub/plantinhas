@@ -1,148 +1,146 @@
 import sqlite3
-import streamlit as st
-from google import genai
 from PIL import Image
+import streamlit as st
+import google.generativeai as genai
 
-# 1. Configuração da página e do Banco de Dados SQLite
-st.set_page_config(page_title="Catálogo de Plantas - Bunnito Pet", layout="wide")
+# Configuração da página do Streamlit
+st.set_page_config(
+    page_title="Catálogo de Plantas", page_icon="🪴", layout="centered"
+)
 
-conn = sqlite3.connect("catalogo_plantas.db", check_same_thread=False)
+# Inicialização do Banco de Dados SQLite
+conn = sqlite3.connect("plantas.db", check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute(
     """
-    CREATE TABLE IF NOT EXISTS plantas (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        nome_popular TEXT,
-        nome_botanico TEXT,
-        familia TEXT,
-        grupo TEXT,
-        luminosidade TEXT,
-        rega TEXT,
-        substrato TEXT,
-        pet_friendly TEXT,
-        observacoes TEXT
-    )
+CREATE TABLE IF NOT EXISTS plantas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    nome_comum TEXT,
+    nome_cientifico TEXT,
+    cuidados TEXT,
+    curiosidades TEXT,
+    data_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
 """
 )
 conn.commit()
 
-# 2. Interface Principal
+# Interface Principal
 st.title("🪴 Catálogo e Identificador de Plantas")
 st.write(
     "Tire uma foto ou carregue uma imagem para identificar e catalogar automaticamente."
 )
 
-# Inserção da Chave de API
-api_key = st.sidebar.text_input("Chave da API Gemini", type="password")
+# Barra Lateral - Chave de API
+st.sidebar.header("Configurações")
+api_key = st.sidebar.text_input(
+    "Chave da API Gemini", type="password", help="Insira a sua chave do Google AI Studio"
+)
 
-aba1, aba2 = st.tabs(["📷 Identificar & Adicionar", "🔍 Banco de Dados"])
+# Navegação por Abas
+tab1, tab2 = st.tabs(["📸 Identificar & Adicionar", "🔍 Banco de Dados"])
 
-with aba1:
-    opcao_imagem = st.radio(
+with tab1:
+    origem_foto = st.radio(
         "Como deseja enviar a foto?", ("Câmara", "Carregar do Dispositivo")
     )
 
-    imagem_enviada = None
-    if opcao_imagem == "Câmara":
-        imagem_enviada = st.camera_input("Tire uma foto da planta")
+    imagem = None
+    if origem_foto == "Câmara":
+        foto_camara = st.camera_input("Tire uma foto da planta")
+        if foto_camara:
+            imagem = Image.open(foto_camara)
     else:
-        imagem_enviada = st.file_uploader(
+        foto_upload = st.file_uploader(
             "Escolha uma imagem...", type=["jpg", "jpeg", "png"]
         )
+        if foto_upload:
+            imagem = Image.open(foto_upload)
 
-    if imagem_enviada and api_key:
-        image = Image.open(imagem_enviada)
-        st.image(image, caption="Imagem para Análise", width=300)
+    if imagem:
+        st.image(imagem, caption="Imagem para Análise", use_column_width=True)
 
-        if st.button("✨ Analisar com Gemini IA"):
-            with st.spinner("A identificar a planta e a extrair dados..."):
+        if not api_key:
+            st.warning("Por favor, insira a sua Chave da API Gemini na barra lateral.")
+        else:
+            if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    client = genai.Client(api_key=api_key)
+                    genai.configure(api_key=api_key)
+                    # Modelo atualizado para versão compatível
+                    model = genai.GenerativeModel("gemini-1.5-flash")
 
                     prompt = """
-                    Analise esta imagem de planta e retorne EXATAMENTE no seguinte formato de linhas (sem formatação markdown extra, apenas o texto):
-                    Nome Popular: [Nome popular principal]
-                    Nome Botânico: [Nome científico em itálico]
-                    Família: [Família botânica]
-                    Grupo: [Grupo 1 - Sol Pleno / Grupo 2 - Meia-Sombra / Outro]
-                    Luminosidade: [Requisito de luz]
-                    Rega: [Frequência de rega]
-                    Substrato: [Tipo de solo ideal]
-                    Pet Friendly: [Sim / Não / Cuidado (com leve explicação)]
-                    Observações: [Breve descrição ou diagnósticos de cultivo/saúde]
+                    Analise esta imagem de planta e responda estritamente no seguinte formato:
+                    Nome Comum: [Nome comum da planta em português]
+                    Nome Científico: [Nome científico em itálico/latim]
+                    Cuidados: [Breve resumo sobre iluminação, rega e solo]
+                    Curiosidades: [Fato interessante sobre a espécie]
                     """
 
-                    response = client.models.generate_content(
-                        model="gemini-2.5-flash", contents=[image, prompt]
-                    )
+                    with st.spinner("A identificar a planta..."):
+                        response = model.generate_content([prompt, imagem])
+                        texto_resposta = response.text
 
-                    st.success("Análise Concluída!")
-                    resultado = response.text
-                    st.text_area(
-                        "Dados Extraídos:",
-                        resultado,
-                        height=220,
-                    )
+                        st.success("Planta Identificada!")
+                        st.markdown(texto_resposta)
 
-                    # Processamento simples das linhas para salvar no BD
-                    linhas = resultado.strip().split("\n")
-                    dados = {}
-                    for linha in linhas:
-                        if ":" in linha:
-                            chave, valor = linha.split(":", 1)
-                            dados[chave.strip()] = valor.strip()
+                        # Processar o texto retornado para guardar no banco de dados
+                        linhas = texto_resposta.strip().split("\n")
+                        dados = {
+                            "Nome Comum": "Desconhecido",
+                            "Nome Científico": "Desconhecido",
+                            "Cuidados": "Não informado",
+                            "Curiosidades": "Não informado",
+                        }
 
-                    # Guardar no SQLite
-                    cursor.execute(
-                        """
-                        INSERT INTO plantas (nome_popular, nome_botanico, familia, grupo, luminosidade, rega, substrato, pet_friendly, observacoes)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            dados.get("Nome Popular", "Desconhecido"),
-                            dados.get("Nome Botânico", "N/A"),
-                            dados.get("Família", "N/A"),
-                            dados.get("Grupo", "N/A"),
-                            dados.get("Luminosidade", "N/A"),
-                            dados.get("Rega", "N/A"),
-                            dados.get("Substrato", "N/A"),
-                            dados.get("Pet Friendly", "N/A"),
-                            dados.get("Observações", "N/A"),
-                        ),
-                    )
-                    conn.commit()
-                    st.success("✅ Planta registada com sucesso no Banco de Dados!")
+                        for linha in linhas:
+                            if ":" in linha:
+                                chave, valor = linha.split(":", 1)
+                                chave_limpa = chave.strip()
+                                if chave_limpa in dados:
+                                    dados[chave_limpa] = valor.strip()
+
+                        # Inserir no SQLite
+                        cursor.execute(
+                            """
+                        INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                            (
+                                dados["Nome Comum"],
+                                dados["Nome Científico"],
+                                dados["Cuidados"],
+                                dados["Curiosidades"],
+                            ),
+                        )
+                        conn.commit()
+                        st.info("✅ Dados salvos com sucesso no seu catálogo!")
 
                 except Exception as e:
                     st.error(f"Erro ao processar imagem: {e}")
 
-    elif imagem_enviada and not api_key:
-        st.warning("Por favor, insira a sua Chave da API Gemini na barra lateral.")
+with tab2:
+    st.header("📋 Plantas Cadastradas")
 
-with aba2:
-    st.subheader("📋 Plantas Cadastradas")
-    busca = st.text_input("🔍 Pesquisar por nome, grupo ou pet friendly:")
+    # Busca por filtro
+    busca = st.text_input("Buscar por nome comum ou científico:")
 
-    query = "SELECT * FROM plantas"
     if busca:
-        query += f" WHERE nome_popular LIKE '%{busca}%' OR nome_botanico LIKE '%{busca}%' OR pet_friendly LIKE '%{busca}%' OR grupo LIKE '%{busca}%'"
-
-    cursor.execute(query)
-    registos = cursor.fetchall()
-
-    if registos:
-        for reg in registos:
-            with st.expander(f"🪴 {reg[1]} ({reg[2]})"):
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.write(f"**Família:** {reg[3]}")
-                    st.write(f"**Grupo:** {reg[4]}")
-                    st.write(f"**Luminosidade:** {reg[5]}")
-                with col2:
-                    st.write(f"**Rega:** {reg[6]}")
-                    st.write(f"**Substrato:** {reg[7]}")
-                    st.write(f"**Pet Friendly:** {reg[8]}")
-                st.info(f"**Observações:** {reg[9]}")
+        cursor.execute(
+            "SELECT * FROM plantas WHERE nome_comum LIKE ? OR nome_cientifico LIKE ?",
+            (f"%{busca}%", f"%{busca}%"),
+        )
     else:
-        st.info("Nenhuma planta encontrada no banco de dados.")
+        cursor.execute("SELECT * FROM plantas ORDER BY data_registro DESC")
+
+    registros = cursor.fetchall()
+
+    if registros:
+        for reg in registros:
+            with st.expander(f"🪴 {reg[1]} ({reg[2]})"):
+                st.write(f"**Cuidados:** {reg[3]}")
+                st.write(f"**Curiosidades:** {reg[4]}")
+                st.caption(f"Registrado em: {reg[5]}")
+    else:
+        st.write("Nenhuma planta cadastrada ainda.")
