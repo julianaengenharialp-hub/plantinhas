@@ -30,21 +30,23 @@ conn.commit()
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Função que converte a imagem e envia via HTTP REST para o Gemini."""
-    # Converter RGBA/PNG com transparência para RGB
+    """Função que converte a imagem e faz varredura dinâmica nos modelos do Gemini."""
+    # Trata transparência (RGBA/PNG) para formato JPEG
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
-    # Converter imagem PIL para Bytes/Base64
+    # Converte imagem PIL para Bytes/Base64
     buffered = io.BytesIO()
     imagem_pil.save(buffered, format="JPEG")
     img_bytes = buffered.getvalue()
     img_base64 = base64.b64encode(img_bytes).decode("utf-8")
 
-    # Lista de modelos atualizados
-    endpoints = [
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}",
-        f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key={api_key}",
+    # Lista de modelos ordenada da melhor opção para os backups universais
+    modelos_para_testar = [
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-3.1-pro-preview",
+        "gemini-2.5-pro",
     ]
 
     prompt_texto = """
@@ -72,28 +74,28 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     }
 
     headers = {"Content-Type": "application/json"}
+    erros_acumulados = []
 
-    ultimo_erro = ""
-    for url in endpoints:
+    # Testa os modelos em sequência até encontrar um ativo na sua chave
+    for modelo in modelos_para_testar:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
         try:
             response = requests.post(
-                url, json=payload, headers=headers, timeout=30
+                url, json=payload, headers=headers, timeout=20
             )
-            dados_resposta = response.json()
+            dados = response.json()
 
             if response.status_code == 200:
-                return dados_resposta["candidates"][0]["content"]["parts"][0][
-                    "text"
-                ]
+                # Sucesso! Retorna o texto gerado
+                return dados["candidates"][0]["content"]["parts"][0]["text"]
             else:
-                mensagem = dados_resposta.get("error", {}).get(
-                    "message", response.text
-                )
-                ultimo_erro = f"Código {response.status_code}: {mensagem}"
+                msg_erro = dados.get("error", {}).get("message", response.text)
+                erros_acumulados.append(f"[{modelo}]: {msg_erro}")
         except Exception as e:
-            ultimo_erro = str(e)
+            erros_acumulados.append(f"[{modelo}]: {str(e)}")
 
-    raise Exception(ultimo_erro)
+    # Se nenhum modelo funcionou, lança os detalhes
+    raise Exception("Nenhum modelo respondeu com sucesso. Detalhes:\n" + "\n".join(erros_acumulados[:2]))
 
 
 # Interface Principal
