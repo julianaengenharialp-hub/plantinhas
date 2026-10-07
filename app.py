@@ -11,7 +11,7 @@ st.set_page_config(
     page_title="Catálogo de Plantas", page_icon="🪴", layout="centered"
 )
 
-# Inicialização do Banco de Dados SQLite com suporte a imagens
+# Inicialização do Banco de Dados SQLite
 conn = sqlite3.connect("plantas.db", check_same_thread=False)
 cursor = conn.cursor()
 
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS plantas (
 """
 )
 
-# Adiciona a coluna imagem_base64 caso a tabela já exista sem ela
+# Garante que a coluna imagem_base64 exista caso a tabela anterior não a tivesse
 try:
     cursor.execute("ALTER TABLE plantas ADD COLUMN imagem_base64 TEXT")
     conn.commit()
@@ -38,33 +38,32 @@ except sqlite3.OperationalError:
 
 
 def extrair_texto_da_resposta(dados):
-    """Extrai texto da resposta JSON do Gemini com fallback para várias estruturas."""
-    try:
-        candidates = dados.get("candidates", [])
-        if not candidates:
-            return None
-
-        content = candidates[0].get("content", {})
-        parts = content.get("parts", [])
-
-        textos = []
-        for part in parts:
-            if isinstance(part, dict) and "text" in part:
-                txt = part["text"].strip()
-                if txt:
-                    textos.append(txt)
-
-        if textos:
-            return "\n".join(textos)
-
-        # Fallback de busca textual genérica caso a estrutura seja diferente
-        return str(dados)
-    except Exception:
+    """Extrai texto com segurança da estrutura de resposta JSON da API Gemini."""
+    if not isinstance(dados, dict):
         return None
+
+    candidates = dados.get("candidates", [])
+    if not candidates:
+        return None
+
+    content = candidates[0].get("content", {})
+    parts = content.get("parts", [])
+
+    textos = []
+    for part in parts:
+        if isinstance(part, dict) and "text" in part:
+            txt = part["text"].strip()
+            if txt:
+                textos.append(txt)
+
+    if textos:
+        return "\n".join(textos)
+
+    return None
 
 
 def converter_imagem_para_base64(imagem_pil):
-    """Converte a imagem PIL para string Base64 compacta para armazenar no SQLite."""
+    """Converte a imagem PIL para string Base64 para gravação no SQLite."""
     if imagem_pil.mode in ("RGBA", "P"):
         imagem_pil = imagem_pil.convert("RGB")
 
@@ -75,18 +74,22 @@ def converter_imagem_para_base64(imagem_pil):
 
 
 def analisar_planta_api_direta(imagem_pil, api_key):
-    """Converte a imagem e realiza a chamada à API Gemini."""
-    img_base64 = converter_imagem_para_base64(imagem_pil)
+    """Faz chamadas REST resilientes à API Gemini e retorna sempre (texto, img_b64)."""
+    img_b64 = converter_imagem_para_base64(imagem_pil)
 
-    modelo_ativo = "gemini-3.8-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo_ativo}:generateContent?key={api_key}"
+    # Modelos estáveis para o endpoint v1beta
+    modelos = [
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-2.5-flash",
+    ]
 
     prompt_texto = """
-    Analise esta imagem de planta e responda exatamente neste formato (mantenha os rótulos):
-    Nome Comum: [Nome comum em português]
+    Analise esta imagem de planta e responda exatamente neste formato:
+    Nome Comum: [Nome comum da planta em português]
     Nome Científico: [Nome científico em latim]
-    Cuidados: [Resumo de rega, iluminação e solo]
-    Curiosidades: [Fato interessante sobre a planta]
+    Cuidados: [Breve resumo sobre iluminação, rega e solo]
+    Curiosidades: [Fato interessante sobre a espécie]
     """
 
     payload = {
@@ -97,7 +100,7 @@ def analisar_planta_api_direta(imagem_pil, api_key):
                     {
                         "inline_data": {
                             "mime_type": "image/jpeg",
-                            "data": img_base64,
+                            "data": img_b64,
                         }
                     },
                 ]
@@ -106,36 +109,40 @@ def analisar_planta_api_direta(imagem_pil, api_key):
     }
 
     headers = {"Content-Type": "application/json"}
+    erros = []
 
-    for tentativa in range(3):
-        try:
-            response = requests.post(
-                url, json=payload, headers=headers, timeout=60
-            )
-            dados = response.json()
+    for modelo in modelos:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{modelo}:generateContent?key={api_key}"
 
-            if response.status_code == 200:
-                texto = extrair_texto_da_resposta(dados)
-                if texto:
-                    return texto, img_base64
-                raise Exception("A API não retornou texto válido.")
+        for tentativa in range(2):
+            try:
+                response = requests.post(
+                    url, json=payload, headers=headers, timeout=45
+                )
+                dados = response.json()
 
-            if response.status_code in [429, 503] or "high demand" in response.text.lower():
-                time.sleep(2)
-                continue
+                if response.status_code == 200:
+                    texto = extrair_texto_da_resposta(dados)
+                    if texto:
+                        return texto, img_b64
+                    erros.append(f"[{modelo}]: Resposta sem texto válido.")
+                else:
+                    msg = dados.get("error", {}).get("message", response.text)
+                    erros.append(f"[{modelo}]: Erro {response.status_code} - {msg}")
 
-            msg_erro = dados.get("error", {}).get("message", response.text)
-            raise Exception(f"Erro {response.status_code}: {msg_erro}")
+                if response.status_code in [429, 503] or "high demand" in response.text.lower():
+                    time.sleep(1.5)
+                    continue
+                else:
+                    break
 
-        except requests.exceptions.Timeout:
-            if tentativa < 2:
-                time.sleep(2)
-                continue
-            raise Exception("O servidor demorou para responder. Tente novamente.")
-        except Exception as e:
-            if tentativa == 2:
-                raise e
-            time.sleep(1)
+            except Exception as e:
+                erros.append(f"[{modelo}]: {str(e)}")
+                time.sleep(1)
+
+    # Se nenhum modelo funcionou, dispara a mensagem com os detalhes dos testes
+    detalhes = "\n".join(erros)
+    raise Exception(f"Não foi possível processar a imagem no momento.\nDetalhes:\n{detalhes}")
 
 
 # Interface Principal
@@ -190,7 +197,7 @@ with tab1:
                     st.success("Planta Identificada com Sucesso!")
                     st.markdown(texto_resposta)
 
-                    # Leitura dos campos retornados
+                    # Leitura dos campos retornados pela IA
                     dados_planta = {
                         "Nome Comum": "Desconhecido",
                         "Nome Científico": "Desconhecido",
@@ -207,7 +214,7 @@ with tab1:
                                     if k.lower() in chave_limpa.lower():
                                         dados_planta[k] = valor.strip()
 
-                    # Inserção no banco de dados SQLite com a foto em Base64
+                    # Gravando no SQLite (incluindo a foto em Base64)
                     cursor.execute(
                         """
                     INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades, imagem_base64)
@@ -225,7 +232,7 @@ with tab1:
                     st.info("✅ Dados e fotografia salvos com sucesso no catálogo!")
 
                 except Exception as e:
-                    st.error(f"Erro ao processar: {e}")
+                    st.error(f"{e}")
 
 with tab2:
     st.header("📋 Plantas Cadastradas")
@@ -244,13 +251,12 @@ with tab2:
 
     if registros:
         for reg in registros:
-            # Estrutura do registro: (id, nome_comum, nome_cientifico, cuidados, curiosidades, imagem_base64, data_registro)
             nome_comum = reg[1] if reg[1] else "Desconhecido"
             nome_cientifico = reg[2] if reg[2] else "Desconhecido"
             cuidados = reg[3] if reg[3] else "Não informado"
             curiosidades = reg[4] if reg[4] else "Não informado"
             img_b64 = reg[5] if len(reg) > 5 else None
-            data_reg = reg[6] if len(reg) > 6 else (reg[5] if len(reg) > 5 and not img_b64 else "")
+            data_reg = reg[6] if len(reg) > 6 else (reg[5] if len(reg) > 5 and not (img_b64 and len(img_b64) > 100) else "")
 
             with st.expander(f"🪴 {nome_comum} ({nome_cientifico})"):
                 col1, col2 = st.columns([1, 2])
