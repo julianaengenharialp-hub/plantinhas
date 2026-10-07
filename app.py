@@ -1,3 +1,4 @@
+import time
 import sqlite3
 from PIL import Image
 import streamlit as st
@@ -66,7 +67,6 @@ with tab1:
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    # Usando o novo cliente do SDK google-genai
                     client = genai.Client(api_key=api_key)
 
                     prompt = """
@@ -77,48 +77,75 @@ with tab1:
                     Curiosidades: [Fato interessante sobre a espécie]
                     """
 
-                    with st.spinner("A identificar a planta..."):
-                        # Atualizado para o modelo gemini-3.8-flash requisitado pela API
-                        response = client.models.generate_content(
-                            model="gemini-3.8-flash",
-                            contents=[prompt, imagem]
-                        )
-                        texto_resposta = response.text
+                    # Lista de modelos por ordem de preferência
+                    modelos_para_testar = [
+                        "gemini-2.5-flash",
+                        "gemini-1.5-flash",
+                        "gemini-3.8-flash"
+                    ]
 
-                        st.success("Planta Identificada!")
-                        st.markdown(texto_resposta)
+                    response = None
+                    erro_ultimo = None
 
-                        # Processar o texto retornado para guardar no banco de dados
-                        linhas = texto_resposta.strip().split("\n")
-                        dados = {
-                            "Nome Comum": "Desconhecido",
-                            "Nome Científico": "Desconhecido",
-                            "Cuidados": "Não informado",
-                            "Curiosidades": "Não informado",
-                        }
+                    with st.spinner("A identificar a planta (aguarde uns segundos)..."):
+                        for modelo in modelos_para_testar:
+                            # Tenta até 2 vezes por modelo se houver erro 503
+                            for tentativa in range(2):
+                                try:
+                                    response = client.models.generate_content(
+                                        model=modelo,
+                                        contents=[prompt, imagem]
+                                    )
+                                    if response:
+                                        break
+                                except Exception as err:
+                                    erro_ultimo = err
+                                    if "503" in str(err) or "UNAVAILABLE" in str(err):
+                                        time.sleep(2)  # Aguarda 2 segundos antes de tentar novamente
+                                    else:
+                                        break
+                            if response:
+                                break
 
-                        for linha in linhas:
-                            if ":" in linha:
-                                chave, valor = linha.split(":", 1)
-                                chave_limpa = chave.strip()
-                                if chave_limpa in dados:
-                                    dados[chave_limpa] = valor.strip()
+                    if not response:
+                        raise erro_ultimo
 
-                        # Inserir no SQLite
-                        cursor.execute(
-                            """
-                        INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                            (
-                                dados["Nome Comum"],
-                                dados["Nome Científico"],
-                                dados["Cuidados"],
-                                dados["Curiosidades"],
-                            ),
-                        )
-                        conn.commit()
-                        st.info("✅ Dados salvos com sucesso no seu catálogo!")
+                    texto_resposta = response.text
+
+                    st.success("Planta Identificada!")
+                    st.markdown(texto_resposta)
+
+                    # Processar o texto retornado para guardar no banco de dados
+                    linhas = texto_resposta.strip().split("\n")
+                    dados = {
+                        "Nome Comum": "Desconhecido",
+                        "Nome Científico": "Desconhecido",
+                        "Cuidados": "Não informado",
+                        "Curiosidades": "Não informado",
+                    }
+
+                    for linha in linhas:
+                        if ":" in linha:
+                            chave, valor = linha.split(":", 1)
+                            chave_limpa = chave.strip()
+                            if chave_limpa in dados:
+                                dados[chave_limpa] = valor.strip()
+
+                    # Inserir no SQLite
+                    cursor.execute(
+                        """
+                    INSERT INTO plantas (nome_comum, nome_cientifico, cuidados, curiosidades)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                        (
+                            dados["Nome Comum"],
+                            dados["Nome Científico"],
+                            dados["Cuidados"],
+                            dados["Curiosidades"],
+                        ),
+                    )
+                    conn.commit()
+                    st.info("✅ Dados salvos com sucesso no seu catálogo!")
 
                 except Exception as e:
                     st.error(f"Erro ao processar imagem: {e}")
