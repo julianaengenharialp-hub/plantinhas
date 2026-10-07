@@ -1,7 +1,7 @@
 import sqlite3
 from PIL import Image
 import streamlit as st
-import google.generativeai as genai
+from google import genai
 
 # Configuração da página do Streamlit
 st.set_page_config(
@@ -66,9 +66,8 @@ with tab1:
         else:
             if st.button("✨ Analisar com Gemini IA"):
                 try:
-                    genai.configure(api_key=api_key)
-                    # Modelo atualizado para versão compatível
-                    model = genai.GenerativeModel("gemini-1.5-flash")
+                    # Inicialização com a biblioteca cliente oficial e modelo estável
+                    client = genai.Client(api_key=api_key)
 
                     prompt = """
                     Analise esta imagem de planta e responda estritamente no seguinte formato:
@@ -79,7 +78,10 @@ with tab1:
                     """
 
                     with st.spinner("A identificar a planta..."):
-                        response = model.generate_content([prompt, imagem])
+                        response = client.models.generate_content(
+                            model="gemini-2.5-flash",
+                            contents=[prompt, imagem]
+                        )
                         texto_resposta = response.text
 
                         st.success("Planta Identificada!")
