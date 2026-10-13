@@ -10,11 +10,16 @@ import requests
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="Meu Jardim", page_icon="🪴", layout="wide")
+st.set_page_config(
+    page_title="Meu Jardim",
+    page_icon="🪴",
+    layout="wide"
+)
 
 DB = "plantas.db"
 GRUPOS = ["Sol pleno", "Luz indireta", "Pouca luz"]
 STATUS = ["Pendente", "No catálogo", "Arquivada"]
+GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
 
 def conectar():
@@ -47,8 +52,9 @@ def salvar(dados, foto):
     with conectar() as con:
         con.execute("""
             INSERT INTO catalogo_v04
-            (nome_comum, nome_cientifico, familia, grupo, score, status,
-             local, observacoes, cuidados, imagem, criado_em)
+            (nome_comum, nome_cientifico, familia, grupo,
+             score, status, local, observacoes,
+             cuidados, imagem, criado_em)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             dados["nome_comum"],
@@ -69,8 +75,9 @@ def atualizar(id_, dados):
     with conectar() as con:
         con.execute("""
             UPDATE catalogo_v04
-            SET nome_comum=?, nome_cientifico=?, familia=?,
-                grupo=?, status=?, observacoes=?, cuidados=?
+            SET nome_comum=?, nome_cientifico=?,
+                familia=?, grupo=?, status=?,
+                observacoes=?, cuidados=?
             WHERE id=?
         """, (
             dados["nome_comum"],
@@ -98,155 +105,211 @@ def tratar_foto(arquivo):
 
     buffer = io.BytesIO()
     imagem.save(buffer, format="JPEG", quality=82)
-
     return buffer.getvalue()
 
 
-def gemini(foto):
+def chave_gemini():
     chave = st.secrets.get("GEMINI_API_KEY")
-
     if not chave:
         raise ValueError(
             "GEMINI_API_KEY não encontrada nos Secrets."
         )
+    return chave
 
+
+def listar_modelos():
+    resposta = requests.get(
+        GEMINI_BASE + "/models",
+        headers={
+            "x-goog-api-key": chave_gemini()
+        },
+        params={"pageSize": 1000},
+        timeout=30
+    )
+
+    if not resposta.ok:
+        raise ValueError(
+            f"Não foi possível consultar os modelos. "
+            f"HTTP {resposta.status_code}: "
+            f"{resposta.text[:250]}"
+        )
+
+    modelos = resposta.json().get("models", [])
+
+    return [
+        m["name"].replace("models/", "", 1)
+        for m in modelos
+        if "generateContent" in (
+            m.get("supportedGenerationMethods") or []
+        )
+        and m.get("name", "").startswith("models/gemini")
+    ]
+
+
+def mensagem_erro_gemini(resposta):
+    codigo = resposta.status_code
+
+    try:
+        mensagem = resposta.json()["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        mensagem = resposta.text[:300]
+
+    if codigo == 404:
+        return (
+            f"Modelo indisponível (HTTP 404). {mensagem} "
+            "Selecione outro modelo na seção de configuração."
+        )
+
+    if codigo == 429:
+        return (
+            "Limite de uso atingido (HTTP 429). "
+            "Aguarde a liberação da cota. "
+            f"Detalhes: {mensagem[:300]}"
+        )
+
+    if codigo in (401, 403):
+        return (
+            "Acesso recusado pelo Google. "
+            f"HTTP {codigo}: {mensagem[:300]}"
+        )
+
+    if codigo >= 500:
+        return (
+            "Serviço Gemini temporariamente indisponível. "
+            f"HTTP {codigo}."
+        )
+
+    return f"Gemini retornou HTTP {codigo}: {mensagem[:350]}"
+
+
+def gerar_ficha_gemini(foto, modelo):
     instrucao = """
-    Analise a fotografia de uma planta para um catálogo
-    doméstico brasileiro.
+Você é um assistente de botânica e horticultura.
 
-    Responda SOMENTE com um objeto JSON válido,
-    sem markdown, contendo exatamente estes campos:
+Analise esta fotografia e produza uma ficha técnica
+de planta para um catálogo doméstico brasileiro.
 
-    nome_comum (string)
-    nome_cientifico (string)
-    familia (string)
-    grupo (uma das strings: 'Sol pleno',
-           'Luz indireta', 'Pouca luz', ou '')
-    luminosidade (string)
-    rega (string)
-    substrato (string)
-    seguranca_animais (string)
-    justificativa_identificacao (string)
-    identificacao_incerta (boolean)
-    alternativas (lista de strings)
+Responda SOMENTE com JSON válido, com estes campos:
 
-    Seja prudente: espécies visualmente semelhantes
-    podem ser indistinguíveis.
+nome_comum: string
+nome_cientifico: string
+familia: string
+grupo: string
+luminosidade: string
+rega: string
+substrato: string
+seguranca_animais: string
+justificativa_identificacao: string
+identificacao_incerta: boolean
+alternativas: lista de strings
 
-    Não invente porcentagem de certeza, fatos
-    botânicos, toxicidade ou fontes.
+O campo grupo deve ser exatamente uma destas opções:
+"Sol pleno", "Luz indireta", "Pouca luz" ou "".
 
-    Se não for possível identificar a espécie com
-    segurança, use nome_cientifico no nível de
-    gênero ou vazio, identificacao_incerta=true
-    e grupo='' se não houver informação suficiente
-    para recomendar luminosidade.
-
-    Não considere tolerância à sombra como
-    preferência por pouca luz.
-
-    Na segurança para cães, gatos e coelhos,
-    indique claramente quando não houver evidência
-    confiável. Não garanta que uma planta é segura.
-
-    Descreva cuidados gerais com cautela, pois
-    clima e condições variam.
-
-    Escreva em português do Brasil.
-    """
+Regras:
+1. Não invente percentuais de confiança.
+2. Identifique características visíveis que fundamentam
+   sua hipótese.
+3. Se houver dúvida entre espécies semelhantes,
+   sinalize identificacao_incerta=true.
+4. Não atribua nome de espécie com certeza quando
+   a fotografia não permitir diferenciá-la.
+5. Se não houver fundamento suficiente para a
+   luminosidade, use grupo="".
+6. Diferencie tolerância à sombra de preferência
+   por pouca luz.
+7. Informe orientações gerais de rega e substrato,
+   considerando que variam conforme clima e ambiente.
+8. Para cães, gatos e coelhos, não invente dados
+   de toxicidade. Quando não houver evidência
+   confiável, declare a incerteza.
+9. Não afirme ter consultado fontes externas.
+10. Escreva em português do Brasil.
+"""
 
     payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": instrucao},
-                    {
-                        "inline_data": {
-                            "mime_type": "image/jpeg",
-                            "data": base64.b64encode(
-                                foto
-                            ).decode("ascii")
-                        }
+        "contents": [{
+            "parts": [
+                {"text": instrucao},
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": base64.b64encode(
+                            foto
+                        ).decode("ascii")
                     }
-                ]
-            }
-        ],
+                }
+            ]
+        }],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "temperature": 0.2
+            "temperature": 0.2,
+            "maxOutputTokens": 2048
         }
     }
 
     resposta = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        f"{GEMINI_BASE}/models/{modelo}:generateContent",
         headers={
-            "x-goog-api-key": chave,
+            "x-goog-api-key": chave_gemini(),
             "Content-Type": "application/json"
         },
         json=payload,
-        timeout=90
+        timeout=120
     )
-
-    if resposta.status_code == 429:
-        raise ValueError(
-            "Limite de uso do Gemini atingido (429). "
-            "Tente novamente mais tarde."
-        )
-
-    if resposta.status_code >= 500:
-        raise ValueError(
-            "Gemini temporariamente indisponível. "
-            "Você poderá tentar novamente."
-        )
 
     if not resposta.ok:
         raise ValueError(
-            f"Gemini retornou HTTP {resposta.status_code}: "
-            f"{resposta.text[:250]}"
+            mensagem_erro_gemini(resposta)
         )
 
-    bruto = resposta.json()
+    retorno = resposta.json()
+    candidatos = retorno.get("candidates") or []
 
-    candidatos = bruto.get("candidates") or []
     if not candidatos:
         raise ValueError(
-            "Gemini não devolveu uma identificação."
+            "O Gemini não retornou uma identificação."
         )
 
-    partes = candidatos[0].get(
-        "content", {}
-    ).get("parts", [])
+    partes = (
+        candidatos[0]
+        .get("content", {})
+        .get("parts", [])
+    )
 
     texto = "".join(
-        p.get("text", "") for p in partes
+        parte.get("text", "")
+        for parte in partes
     )
 
     if not texto.strip():
         raise ValueError(
-            "Gemini não devolveu uma ficha."
+            "O Gemini não retornou uma ficha. "
+            "A resposta pode ter sido interrompida."
         )
 
     try:
         ficha = json.loads(texto)
     except json.JSONDecodeError:
         raise ValueError(
-            "A ficha veio em formato inesperado."
+            "A ficha foi recebida incompleta "
+            "ou em formato inválido."
         )
 
     if not isinstance(ficha, dict):
         raise ValueError(
-            "A resposta não contém uma ficha válida."
+            "O Gemini retornou um formato inesperado."
         )
 
     return ficha
 
 
-def plantnet(foto):
+def consultar_plantnet(foto):
     chave = st.secrets.get("PLANTNET_API_KEY")
 
     if not chave:
         raise ValueError(
-            "PLANTNET_API_KEY não encontrada nos Secrets."
+            "PLANTNET_API_KEY não encontrada."
         )
 
     resposta = requests.post(
@@ -276,27 +339,33 @@ def plantnet(foto):
     return resposta.json().get("results", [])
 
 
-def campos(prefixo, inicial):
+def texto_seguro(valor):
+    if valor is None:
+        return ""
+    return str(valor)
+
+
+def campos_formulario(prefixo, inicial):
     nome = st.text_input(
         "Nome popular",
-        value=str(
-            inicial.get("nome_comum") or ""
+        value=texto_seguro(
+            inicial.get("nome_comum")
         ),
         key=prefixo + "nome"
     )
 
     cientifico = st.text_input(
         "Nome científico",
-        value=str(
-            inicial.get("nome_cientifico") or ""
+        value=texto_seguro(
+            inicial.get("nome_cientifico")
         ),
         key=prefixo + "cientifico"
     )
 
     familia = st.text_input(
-        "Família",
-        value=str(
-            inicial.get("familia") or ""
+        "Família botânica",
+        value=texto_seguro(
+            inicial.get("familia")
         ),
         key=prefixo + "familia"
     )
@@ -305,7 +374,7 @@ def campos(prefixo, inicial):
     opcoes = ["Não definida"] + GRUPOS
 
     grupo = st.selectbox(
-        "Luminosidade",
+        "Grupo de luminosidade",
         opcoes,
         index=(
             opcoes.index(grupo_atual)
@@ -316,31 +385,29 @@ def campos(prefixo, inicial):
 
     cuidados = st.text_area(
         "Ficha de cuidados",
-        value=str(
-            inicial.get("cuidados") or ""
+        value=texto_seguro(
+            inicial.get("cuidados")
         ),
-        height=220,
+        height=240,
         key=prefixo + "cuidados"
     )
 
     observacoes = st.text_area(
         "Observações pessoais",
-        value=str(
-            inicial.get("observacoes") or ""
+        value=texto_seguro(
+            inicial.get("observacoes")
         ),
         key=prefixo + "observacoes"
     )
 
-    status_atual = (
-        inicial.get("status") or "Pendente"
-    )
+    situacao = inicial.get("status") or "Pendente"
 
     status = st.selectbox(
         "Situação",
         STATUS,
         index=(
-            STATUS.index(status_atual)
-            if status_atual in STATUS else 0
+            STATUS.index(situacao)
+            if situacao in STATUS else 0
         ),
         key=prefixo + "status"
     )
@@ -373,40 +440,81 @@ def validar(dados):
     ):
         st.error(
             "A luminosidade está indefinida. "
-            "Revise a ficha ou salve como Pendente."
+            "Revise a ficha ou mantenha como Pendente."
         )
         return False
 
     return True
 
 
-# INICIALIZAÇÃO
-
 preparar_banco()
 
 st.title("🪴 Meu Jardim")
-
 st.caption(
-    "Identificação por IA • Pl@ntNet como "
-    "segunda opinião • fichas revisáveis"
+    "Identificação por Gemini • Segunda opinião Pl@ntNet"
 )
 
 st.warning(
-    "Armazenamento ainda provisório: o banco local "
-    "do Streamlit Cloud pode ser apagado em "
-    "reinicializações. Não cadastre sua coleção "
-    "definitiva nesta versão."
+    "Armazenamento provisório: os cadastros podem "
+    "ser perdidos após reinicializações do Streamlit."
 )
 
-aba_foto, aba_catalogo = st.tabs([
-    "📸 Identificar planta",
+aba_identificar, aba_catalogo = st.tabs([
+    "📸 Identificar",
     "🌿 Meu catálogo"
 ])
 
 
-# IDENTIFICAÇÃO
+with aba_identificar:
 
-with aba_foto:
+    with st.expander(
+        "⚙️ Configuração do Gemini"
+    ):
+        st.caption(
+            "O modelo 2.5 Flash não está disponível "
+            "para novas contas. Vamos usar um modelo "
+            "mais recente, sujeito aos limites "
+            "da sua chave."
+        )
+
+        modelo = st.text_input(
+            "Modelo Gemini",
+            value="gemini-3.8-flash",
+            key="modelo_gemini"
+        ).strip()
+
+        if st.button(
+            "Consultar modelos disponíveis"
+        ):
+            try:
+                with st.spinner(
+                    "Consultando modelos do Google..."
+                ):
+                    modelos = listar_modelos()
+
+                if modelos:
+                    st.write(
+                        "Modelos que anunciam suporte "
+                        "à geração de conteúdo:"
+                    )
+                    st.code("\n".join(modelos))
+                else:
+                    st.warning(
+                        "Nenhum modelo de geração "
+                        "foi retornado."
+                    )
+
+                st.caption(
+                    "Estar listado não garante "
+                    "cota gratuita nem acesso "
+                    "à geração de imagens."
+                )
+
+            except (
+                ValueError,
+                requests.RequestException
+            ) as erro:
+                st.error(str(erro))
 
     origem = st.radio(
         "Fotografia",
@@ -416,15 +524,16 @@ with aba_foto:
 
     if origem == "Enviar imagem":
         arquivo = st.file_uploader(
-            "Selecione uma foto",
+            "Selecione uma fotografia",
             type=["jpg", "jpeg", "png"]
         )
     else:
         arquivo = st.camera_input(
-            "Fotografe a planta"
+            "Fotografe sua planta"
         )
 
     if arquivo is not None:
+
         try:
             foto = tratar_foto(arquivo)
 
@@ -435,10 +544,7 @@ with aba_foto:
             if st.session_state.get(
                 "foto_id"
             ) != assinatura:
-
-                st.session_state[
-                    "foto_id"
-                ] = assinatura
+                st.session_state["foto_id"] = assinatura
 
                 for chave in [
                     "ficha_ia",
@@ -449,17 +555,19 @@ with aba_foto:
                         chave, None
                     )
 
-            col_img, col_acao = st.columns([1, 1])
+            col_foto, col_botoes = st.columns(
+                [1, 1]
+            )
 
-            with col_img:
+            with col_foto:
                 st.image(
                     foto,
                     use_container_width=True
                 )
 
-            with col_acao:
-                st.write(
-                    "**Análise da fotografia**"
+            with col_botoes:
+                st.subheader(
+                    "Análise da fotografia"
                 )
 
                 if st.button(
@@ -467,24 +575,34 @@ with aba_foto:
                     type="primary",
                     use_container_width=True
                 ):
-                    try:
-                        with st.spinner(
-                            "Analisando e preparando "
-                            "a ficha..."
-                        ):
+                    if not modelo:
+                        st.error(
+                            "Informe um modelo Gemini."
+                        )
+                    else:
+                        try:
+                            with st.spinner(
+                                "Identificando e "
+                                "preparando a ficha..."
+                            ):
+                                ficha = gerar_ficha_gemini(
+                                    foto,
+                                    modelo
+                                )
+
                             st.session_state[
                                 "ficha_ia"
-                            ] = gemini(foto)
+                            ] = ficha
 
-                        st.session_state.pop(
-                            "foto_salva", None
-                        )
+                            st.session_state.pop(
+                                "foto_salva", None
+                            )
 
-                    except (
-                        ValueError,
-                        requests.RequestException
-                    ) as erro:
-                        st.error(str(erro))
+                        except (
+                            ValueError,
+                            requests.RequestException
+                        ) as erro:
+                            st.error(str(erro))
 
                 if st.button(
                     "🔎 Segunda opinião: Pl@ntNet",
@@ -494,9 +612,13 @@ with aba_foto:
                         with st.spinner(
                             "Consultando Pl@ntNet..."
                         ):
-                            st.session_state[
-                                "opiniao_plantnet"
-                            ] = plantnet(foto)
+                            resultados = (
+                                consultar_plantnet(foto)
+                            )
+
+                        st.session_state[
+                            "opiniao_plantnet"
+                        ] = resultados
 
                     except (
                         ValueError,
@@ -504,31 +626,31 @@ with aba_foto:
                     ) as erro:
                         st.error(str(erro))
 
-            if "opiniao_plantnet" in st.session_state:
+            resultados = st.session_state.get(
+                "opiniao_plantnet"
+            )
+
+            if resultados is not None:
 
                 with st.expander(
-                    "Resultados da segunda opinião",
+                    "Segunda opinião do Pl@ntNet",
                     expanded=True
                 ):
-                    resultados = st.session_state[
-                        "opiniao_plantnet"
-                    ]
-
                     if not resultados:
                         st.info(
-                            "Nenhuma sugestão encontrada."
+                            "Nenhuma identificação encontrada."
                         )
 
                     for item in resultados[:5]:
-                        esp = (
+                        especie = (
                             item.get("species") or {}
                         )
 
                         nome = (
-                            esp.get(
+                            especie.get(
                                 "scientificNameWithoutAuthor"
                             )
-                            or esp.get(
+                            or especie.get(
                                 "scientificName"
                             )
                             or "Não informado"
@@ -539,13 +661,13 @@ with aba_foto:
                         )
 
                         st.write(
-                            f"*{nome}* • score Pl@ntNet: "
-                            f"{score * 100:.1f}%"
+                            f"*{nome}* • "
+                            f"score: {score * 100:.1f}%"
                         )
 
                     st.caption(
-                        "Scores de correspondência "
-                        "não garantem identificação correta."
+                        "O score não representa "
+                        "certeza estatística."
                     )
 
             ficha = st.session_state.get(
@@ -554,6 +676,7 @@ with aba_foto:
 
             if ficha:
 
+                st.divider()
                 st.subheader(
                     "Ficha técnica sugerida"
                 )
@@ -563,54 +686,46 @@ with aba_foto:
                 ):
                     st.warning(
                         "Identificação incerta. "
-                        "Compare as alternativas "
-                        "antes de confirmar."
+                        "Confira antes de confirmar."
                     )
 
                 st.markdown(
-                    "**Por que a IA sugeriu "
-                    "essa identificação?**"
+                    "**Justificativa da identificação**"
                 )
 
                 st.write(
                     ficha.get(
                         "justificativa_identificacao"
-                    ) or "Não informado"
+                    ) or "Não informada"
                 )
 
                 alternativas = (
                     ficha.get("alternativas") or []
                 )
 
-                if alternativas:
-                    st.caption(
-                        "Outras possibilidades: "
-                        + ", ".join(
-                            str(x)
-                            for x in alternativas
+                if isinstance(alternativas, list):
+                    if alternativas:
+                        st.write(
+                            "**Outras possibilidades:** "
+                            + ", ".join(
+                                str(x)
+                                for x in alternativas
+                            )
                         )
-                    )
 
-                cuidados = "\n".join([
-                    "Luminosidade: "
-                    + str(
+                cuidados = "\n\n".join([
+                    "LUMINOSIDADE\n" + texto_seguro(
                         ficha.get("luminosidade")
-                        or "Não informada"
                     ),
-                    "Rega: "
-                    + str(
+                    "REGA\n" + texto_seguro(
                         ficha.get("rega")
-                        or "Não informada"
                     ),
-                    "Substrato: "
-                    + str(
+                    "SUBSTRATO\n" + texto_seguro(
                         ficha.get("substrato")
-                        or "Não informado"
                     ),
-                    "Segurança para animais: "
-                    + str(
+                    "SEGURANÇA PARA ANIMAIS\n"
+                    + texto_seguro(
                         ficha.get("seguranca_animais")
-                        or "Não verificada"
                     )
                 ])
 
@@ -644,9 +759,10 @@ with aba_foto:
                 }
 
                 st.info(
-                    "Confira a identificação e os cuidados. "
-                    "As orientações da IA podem conter erros, "
-                    "especialmente sobre toxicidade para animais."
+                    "Confira as informações geradas "
+                    "pela IA antes de salvar. "
+                    "Alertas de toxicidade exigem "
+                    "confirmação em fontes confiáveis."
                 )
 
                 if st.session_state.get(
@@ -654,27 +770,26 @@ with aba_foto:
                 ) == assinatura:
 
                     st.success(
-                        "Planta salva. Confira "
-                        "a aba Meu catálogo."
+                        "Planta salva no catálogo!"
                     )
 
                 else:
 
                     with st.form(
-                        "form_nova_planta"
+                        "cadastro_nova_planta"
                     ):
-                        dados = campos(
+                        dados = campos_formulario(
                             "nova_", inicial
                         )
 
-                        enviar = (
+                        enviado = (
                             st.form_submit_button(
                                 "💾 Salvar planta",
                                 type="primary"
                             )
                         )
 
-                    if enviar and validar(dados):
+                    if enviado and validar(dados):
                         salvar(dados, foto)
 
                         st.session_state[
@@ -688,12 +803,9 @@ with aba_foto:
             ValueError
         ) as erro:
             st.error(
-                "Não foi possível abrir "
-                f"a fotografia: {erro}"
+                f"Erro ao processar fotografia: {erro}"
             )
 
-
-# CATÁLOGO UNIFICADO
 
 with aba_catalogo:
 
@@ -748,7 +860,7 @@ with aba_catalogo:
         )
 
     busca = st.text_input(
-        "Buscar pelo nome",
+        "Buscar planta",
         placeholder=(
             "Nome popular ou científico"
         )
@@ -769,32 +881,29 @@ with aba_catalogo:
         )
 
         and busca.casefold() in (
-            str(p["nome_comum"] or "")
+            texto_seguro(p["nome_comum"])
             + " "
-            + str(p["nome_cientifico"] or "")
+            + texto_seguro(p["nome_cientifico"])
         ).casefold()
     ]
 
     if not visiveis:
         st.info(
-            "Nenhuma planta encontrada "
-            "para esses filtros."
+            "Nenhuma planta encontrada."
         )
 
     for inicio in range(
         0, len(visiveis), 3
     ):
-        cols = st.columns(3)
+        colunas = st.columns(3)
 
-        for col, planta in zip(
-            cols,
+        for coluna, planta in zip(
+            colunas,
             visiveis[inicio:inicio + 3]
         ):
-            with col:
+            with coluna:
 
-                with st.container(
-                    border=True
-                ):
+                with st.container(border=True):
 
                     if planta["imagem"]:
                         st.image(
@@ -827,7 +936,7 @@ with aba_catalogo:
                         with st.form(
                             f"editar_{planta['id']}"
                         ):
-                            dados = campos(
+                            dados = campos_formulario(
                                 f"edit_{planta['id']}_",
                                 planta
                             )
@@ -838,18 +947,15 @@ with aba_catalogo:
                                 )
                             )
 
-                        if gravar and validar(
-                            dados
-                        ):
+                        if gravar and validar(dados):
                             atualizar(
                                 planta["id"],
                                 dados
                             )
-
                             st.rerun()
 
                         confirmar = st.checkbox(
-                            "Confirmo a exclusão permanente",
+                            "Confirmo a exclusão definitiva",
                             key=f"conf_{planta['id']}"
                         )
 
@@ -858,8 +964,5 @@ with aba_catalogo:
                             key=f"del_{planta['id']}",
                             disabled=not confirmar
                         ):
-                            excluir(
-                                planta["id"]
-                            )
-
+                            excluir(planta["id"])
                             st.rerun()
