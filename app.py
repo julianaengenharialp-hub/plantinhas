@@ -1,7 +1,4 @@
 
-# Meu Catálogo de Plantas - versão 0.4
-# Armazenamento local provisório
-
 import io
 import sqlite3
 import hashlib
@@ -23,9 +20,9 @@ STATUS = ["Pendente", "No catálogo", "Arquivada"]
 
 
 def conectar():
-    conexao = sqlite3.connect(DB, timeout=20)
-    conexao.row_factory = sqlite3.Row
-    return conexao
+    con = sqlite3.connect(DB, timeout=20)
+    con.row_factory = sqlite3.Row
+    return con
 
 
 def preparar_banco():
@@ -63,7 +60,7 @@ def salvar(dados, foto):
             dados["grupo"],
             dados["score"],
             dados["status"],
-            dados["local"],
+            "",
             dados["observacoes"],
             dados["cuidados"],
             foto,
@@ -75,9 +72,13 @@ def atualizar(id_, dados):
     with conectar() as con:
         con.execute("""
             UPDATE catalogo_v04
-            SET nome_comum=?, nome_cientifico=?,
-                familia=?, grupo=?, status=?,
-                local=?, observacoes=?, cuidados=?
+            SET nome_comum=?,
+                nome_cientifico=?,
+                familia=?,
+                grupo=?,
+                status=?,
+                observacoes=?,
+                cuidados=?
             WHERE id=?
         """, (
             dados["nome_comum"],
@@ -85,7 +86,6 @@ def atualizar(id_, dados):
             dados["familia"],
             dados["grupo"],
             dados["status"],
-            dados["local"],
             dados["observacoes"],
             dados["cuidados"],
             id_
@@ -100,13 +100,12 @@ def excluir(id_):
         )
 
 
-def identificar(imagem_bytes):
-    try:
-        chave = st.secrets["PLANTNET_API_KEY"]
-    except (KeyError, FileNotFoundError):
+def identificar(foto):
+    chave = st.secrets.get("PLANTNET_API_KEY")
+
+    if not chave:
         raise ValueError(
-            "Chave PLANTNET_API_KEY não encontrada "
-            "nos Secrets do Streamlit."
+            "PLANTNET_API_KEY não encontrada nos Secrets."
         )
 
     resposta = requests.post(
@@ -118,7 +117,7 @@ def identificar(imagem_bytes):
         files={
             "images": (
                 "planta.jpg",
-                imagem_bytes,
+                foto,
                 "image/jpeg"
             )
         },
@@ -126,52 +125,69 @@ def identificar(imagem_bytes):
         timeout=60
     )
 
-    if resposta.status_code == 429:
-        raise ValueError(
-            "Limite de identificações atingido. "
-            "Tente novamente mais tarde."
-        )
-
-    if resposta.status_code in (401, 403):
-        raise ValueError(
-            "A chave Pl@ntNet foi recusada. "
-            "Verifique os Secrets."
-        )
-
-    if resposta.status_code >= 500:
-        raise ValueError(
-            "Pl@ntNet temporariamente indisponível."
-        )
-
     if not resposta.ok:
         raise ValueError(
-            f"Pl@ntNet retornou erro "
+            f"Pl@ntNet retornou HTTP "
             f"{resposta.status_code}: "
-            f"{resposta.text[:250]}"
+            f"{resposta.text[:200]}"
         )
 
     resultados = resposta.json().get("results", [])
 
     if not resultados:
         raise ValueError(
-            "Nenhuma identificação encontrada. "
-            "Tente outra fotografia."
+            "Nenhuma identificação encontrada."
         )
 
     return resultados
 
 
-def texto_taxon(taxon):
-    if isinstance(taxon, dict):
+def taxon(valor):
+    if isinstance(valor, dict):
         return (
-            taxon.get("scientificNameWithoutAuthor")
-            or taxon.get("scientificName")
+            valor.get("scientificNameWithoutAuthor")
+            or valor.get("scientificName")
             or ""
         )
-    return str(taxon or "")
+
+    return str(valor or "")
 
 
-def campos_formulario(prefixo, inicial):
+def pesquisar_perenual(nome):
+    chave = st.secrets.get("PERENUAL_API_KEY")
+
+    if not chave:
+        raise ValueError(
+            "PERENUAL_API_KEY não encontrada nos Secrets."
+        )
+
+    resposta = requests.get(
+        "https://perenual.com/api/v2/species-list",
+        params={
+            "key": chave,
+            "q": nome
+        },
+        timeout=35
+    )
+
+    if not resposta.ok:
+        raise ValueError(
+            f"Perenual retornou HTTP "
+            f"{resposta.status_code}: "
+            f"{resposta.text[:250]}"
+        )
+
+    dados = resposta.json()
+
+    if not isinstance(dados, dict):
+        raise ValueError(
+            "Resposta inesperada da Perenual."
+        )
+
+    return dados
+
+
+def ficha_campos(prefixo, inicial):
     nome = st.text_input(
         "Nome comum",
         value=inicial.get("nome_comum", ""),
@@ -194,7 +210,7 @@ def campos_formulario(prefixo, inicial):
     opcoes = ["Não definido"] + GRUPOS
 
     grupo = st.selectbox(
-        "Grupo de luminosidade",
+        "Luminosidade",
         opcoes,
         index=(
             opcoes.index(grupo_atual)
@@ -203,30 +219,24 @@ def campos_formulario(prefixo, inicial):
         key=prefixo + "grupo"
     )
 
-    local = st.text_input(
-        "Local na casa (opcional)",
-        value=inicial.get("local", ""),
-        key=prefixo + "local"
-    )
-
     cuidados = st.text_area(
-        "Cuidados verificados por você (opcional)",
+        "Cuidados (opcional)",
         value=inicial.get("cuidados", ""),
         key=prefixo + "cuidados"
     )
 
     observacoes = st.text_area(
-        "Observações pessoais (opcional)",
+        "Observações (opcional)",
         value=inicial.get("observacoes", ""),
         key=prefixo + "observacoes"
     )
 
-    status_atual = inicial.get("status", "Pendente")
+    situacao = inicial.get("status", "Pendente")
 
     status = st.selectbox(
         "Situação",
         STATUS,
-        index=STATUS.index(status_atual),
+        index=STATUS.index(situacao),
         key=prefixo + "status"
     )
 
@@ -234,8 +244,9 @@ def campos_formulario(prefixo, inicial):
         "nome_comum": nome.strip(),
         "nome_cientifico": cientifico.strip(),
         "familia": familia.strip(),
-        "grupo": "" if grupo == "Não definido" else grupo,
-        "local": local.strip(),
+        "grupo": (
+            "" if grupo == "Não definido" else grupo
+        ),
         "cuidados": cuidados.strip(),
         "observacoes": observacoes.strip(),
         "status": status,
@@ -250,30 +261,128 @@ preparar_banco()
 st.title("🪴 Meu Catálogo de Plantas")
 
 st.caption(
-    "Versão 0.4 • Identificação Pl@ntNet"
+    "Versão de teste: identificação + consulta à Perenual"
 )
 
 st.warning(
-    "Os cadastros desta versão usam armazenamento "
-    "local provisório e podem ser perdidos quando "
-    "o Streamlit reiniciar. Utilize para testes."
+    "Os registros ainda são armazenados localmente "
+    "e podem ser perdidos quando o Streamlit reiniciar."
 )
 
-aba_identificar, aba_catalogo, aba_pendentes, aba_arquivadas = st.tabs([
+aba_identificar, aba_catalogo, aba_teste = st.tabs([
     "📸 Identificar",
-    "🪴 Catálogo",
-    "⏳ Pendentes",
-    "📦 Arquivadas"
+    "🪴 Meu catálogo",
+    "🔬 Testar Perenual"
 ])
 
 
-# ABA IDENTIFICAR
+# TESTE DA PERENUAL
+
+with aba_teste:
+    st.subheader("Verificar cobertura da Perenual")
+
+    st.write(
+        "Vamos consultar as duas espécies sem adicioná-las "
+        "automaticamente ao catálogo."
+    )
+
+    if st.button(
+        "🔎 Testar as duas espécies",
+        type="primary"
+    ):
+        for nome in [
+            "Sedum deppeanum",
+            "Crassula pellucida"
+        ]:
+            st.markdown(f"#### *{nome}*")
+
+            try:
+                with st.spinner("Consultando Perenual..."):
+                    resposta = pesquisar_perenual(nome)
+
+                itens = resposta.get("data") or []
+
+                if not itens:
+                    st.warning(
+                        "Nenhum registro retornado "
+                        "para esta pesquisa."
+                    )
+
+                else:
+                    st.write(
+                        f"Registros retornados: {len(itens)}"
+                    )
+
+                    for item in itens[:5]:
+                        st.write(
+                            "**Nome comum:**",
+                            item.get("common_name")
+                            or "Não informado"
+                        )
+
+                        nomes_cientificos = (
+                            item.get("scientific_name") or []
+                        )
+
+                        if isinstance(
+                            nomes_cientificos, str
+                        ):
+                            nomes_cientificos = [
+                                nomes_cientificos
+                            ]
+
+                        st.write(
+                            "**Nome científico:**",
+                            ", ".join(nomes_cientificos)
+                            or "Não informado"
+                        )
+
+                        st.write(
+                            "**Luminosidade (sunlight):**",
+                            item.get("sunlight")
+                            or "Não informada"
+                        )
+
+                        st.write(
+                            "**Rega (watering):**",
+                            item.get("watering")
+                            or "Não informada"
+                        )
+
+                        st.write(
+                            "**ID Perenual:**",
+                            item.get("id")
+                        )
+
+                        st.divider()
+
+                with st.expander(
+                    "Detalhes técnicos da resposta"
+                ):
+                    st.json({
+                        "total": resposta.get("total"),
+                        "per_page": resposta.get("per_page"),
+                        "current_page": resposta.get(
+                            "current_page"
+                        )
+                    })
+
+            except (
+                ValueError,
+                requests.RequestException
+            ) as erro:
+                st.error(str(erro))
+
+
+# IDENTIFICAÇÃO PELO PLANTNET
 
 with aba_identificar:
-
     origem = st.radio(
-        "Como deseja enviar a fotografia?",
-        ["Carregar do dispositivo", "Tirar foto"]
+        "Fotografia",
+        [
+            "Carregar do dispositivo",
+            "Tirar foto"
+        ]
     )
 
     if origem == "Carregar do dispositivo":
@@ -287,15 +396,12 @@ with aba_identificar:
         )
 
     if arquivo is not None:
-
         try:
-            imagem = Image.open(arquivo)
+            imagem = Image.open(arquivo).convert("RGB")
             imagem.thumbnail((1600, 1600))
 
-            if imagem.mode != "RGB":
-                imagem = imagem.convert("RGB")
-
             buffer = io.BytesIO()
+
             imagem.save(
                 buffer,
                 format="JPEG",
@@ -306,7 +412,6 @@ with aba_identificar:
 
             st.image(
                 foto,
-                caption="Fotografia selecionada",
                 use_container_width=True
             )
 
@@ -317,7 +422,6 @@ with aba_identificar:
             if st.session_state.get(
                 "assinatura_foto"
             ) != assinatura:
-
                 st.session_state[
                     "assinatura_foto"
                 ] = assinatura
@@ -331,25 +435,19 @@ with aba_identificar:
                 )
 
             if st.button(
-                "🔎 Identificar planta",
-                type="primary"
+                "🔎 Identificar planta"
             ):
-
                 try:
                     with st.spinner(
-                        "Identificando com Pl@ntNet..."
+                        "Consultando Pl@ntNet..."
                     ):
                         st.session_state[
                             "resultados_plantnet"
                         ] = identificar(foto)
 
-                    st.session_state.pop(
-                        "salvo_assinatura", None
-                    )
-
                 except (
-                    requests.RequestException,
-                    ValueError
+                    ValueError,
+                    requests.RequestException
                 ) as erro:
                     st.error(str(erro))
 
@@ -358,10 +456,21 @@ with aba_identificar:
             )
 
             if resultados:
-
                 principal = resultados[0]
-                especie = principal.get("species") or {}
-                nomes = especie.get("commonNames") or []
+                especie = (
+                    principal.get("species") or {}
+                )
+
+                nomes = (
+                    especie.get("commonNames") or []
+                )
+
+                cientifico = taxon(
+                    especie.get(
+                        "scientificNameWithoutAuthor"
+                    )
+                    or especie.get("scientificName")
+                )
 
                 score = float(
                     principal.get("score") or 0
@@ -372,97 +481,95 @@ with aba_identificar:
                 )
 
                 st.write(
-                    f"**{nomes[0] if nomes else 'Nome comum não informado'}**"
-                )
-
-                nome_cientifico = texto_taxon(
-                    especie.get("scientificNameWithoutAuthor")
-                    or especie.get("scientificName")
-                )
-
-                st.write(f"*{nome_cientifico}*")
-
-                st.progress(
-                    max(0.0, min(score, 1.0))
+                    "**Nome:**",
+                    nomes[0] if nomes
+                    else "Não informado"
                 )
 
                 st.write(
-                    f"Score Pl@ntNet: **{score * 100:.1f}%**"
+                    "**Nome científico:**",
+                    cientifico
+                )
+
+                st.write(
+                    f"**Score Pl@ntNet:** "
+                    f"{score * 100:.1f}%"
                 )
 
                 st.caption(
-                    "O score é uma medida de compatibilidade "
-                    "do Pl@ntNet, não uma garantia de acerto."
+                    "O score não garante que a "
+                    "identificação esteja correta."
                 )
 
-                if len(resultados) > 1:
+                with st.expander(
+                    "Outras possibilidades"
+                ):
+                    for item in resultados[1:5]:
+                        esp = item.get(
+                            "species"
+                        ) or {}
 
-                    with st.expander(
-                        "Outras identificações possíveis"
-                    ):
-
-                        for item in resultados[1:5]:
-
-                            sp = item.get("species") or {}
-
-                            nome_alt = texto_taxon(
-                                sp.get("scientificNameWithoutAuthor")
-                                or sp.get("scientificName")
+                        nome_alt = taxon(
+                            esp.get(
+                                "scientificNameWithoutAuthor"
                             )
-
-                            score_alt = float(
-                                item.get("score") or 0
+                            or esp.get(
+                                "scientificName"
                             )
+                        )
 
-                            st.write(
-                                f"{nome_alt} • "
-                                f"{score_alt * 100:.1f}%"
-                            )
+                        score_alt = float(
+                            item.get("score") or 0
+                        )
+
+                        st.write(
+                            nome_alt,
+                            f"({score_alt * 100:.1f}%)"
+                        )
 
                 if st.session_state.get(
                     "salvo_assinatura"
                 ) == assinatura:
-
                     st.success(
-                        "Planta salva! Confira a aba "
-                        "correspondente."
+                        "Planta salva! Veja a aba "
+                        "Meu catálogo."
                     )
 
                 else:
-
                     st.info(
-                        "Revise os dados antes de salvar. "
-                        "O Pl@ntNet não fornece orientações "
-                        "de cultivo nem classifica os três "
-                        "grupos de luminosidade."
+                        "A luminosidade ainda não será "
+                        "preenchida automaticamente. "
+                        "Estamos validando a Perenual primeiro."
                     )
 
                     inicial = {
                         "nome_comum": (
                             nomes[0] if nomes else ""
                         ),
-                        "nome_cientifico": nome_cientifico,
-                        "familia": texto_taxon(
+                        "nome_cientifico": cientifico,
+                        "familia": taxon(
                             especie.get("family")
                         ),
                         "score": score,
                         "status": "Pendente"
                     }
 
-                    with st.form("cadastro_nova_planta"):
-
-                        dados = campos_formulario(
-                            "nova_", inicial
+                    with st.form(
+                        "nova_planta"
+                    ):
+                        dados = ficha_campos(
+                            "nova_",
+                            inicial
                         )
 
-                        enviado = st.form_submit_button(
-                            "💾 Salvar planta"
+                        enviado = (
+                            st.form_submit_button(
+                                "💾 Salvar planta"
+                            )
                         )
 
                     if enviado:
-
                         if not dados["nome_comum"]:
-
                             st.error(
                                 "Informe um nome comum "
                                 "ou provisório."
@@ -472,15 +579,14 @@ with aba_identificar:
                             dados["status"] == "No catálogo"
                             and not dados["grupo"]
                         ):
-
                             st.error(
-                                "Selecione o grupo de "
-                                "luminosidade para incluir "
-                                "a planta no catálogo."
+                                "Para entrar no catálogo, "
+                                "a luminosidade precisa estar "
+                                "definida. Por enquanto, "
+                                "salve como Pendente."
                             )
 
                         else:
-
                             salvar(dados, foto)
 
                             st.session_state[
@@ -489,124 +595,152 @@ with aba_identificar:
 
                             st.rerun()
 
-        except (OSError, ValueError) as erro:
-
+        except (
+            OSError,
+            ValueError
+        ) as erro:
             st.error(
-                f"Não foi possível processar "
-                f"a fotografia: {erro}"
+                "Não foi possível processar "
+                f"a imagem: {erro}"
             )
 
 
-# CONSULTA AO BANCO
+# CATÁLOGO UNIFICADO
 
-with conectar() as con:
-    registros = [
-        dict(r)
-        for r in con.execute(
-            "SELECT * FROM catalogo_v04 "
-            "ORDER BY id DESC"
-        ).fetchall()
-    ]
-
-
-# ABAS DO CATÁLOGO
-
-for aba, situacao in [
-    (aba_catalogo, "No catálogo"),
-    (aba_pendentes, "Pendente"),
-    (aba_arquivadas, "Arquivada")
-]:
-
-    with aba:
-
-        st.subheader(
-            situacao
-            if situacao != "No catálogo"
-            else "Minhas plantas"
-        )
-
-        selecionados = [
-            r for r in registros
-            if r["status"] == situacao
+with aba_catalogo:
+    with conectar() as con:
+        plantas = [
+            dict(x)
+            for x in con.execute(
+                "SELECT * FROM catalogo_v04 "
+                "ORDER BY id DESC"
+            ).fetchall()
         ]
 
-        if situacao == "No catálogo":
+    st.subheader("Minhas plantas")
 
-            filtro = st.selectbox(
-                "Filtrar por luminosidade",
-                ["Todos"] + GRUPOS
+    total_catalogo = sum(
+        p["status"] == "No catálogo"
+        for p in plantas
+    )
+
+    total_pendentes = sum(
+        p["status"] == "Pendente"
+        for p in plantas
+    )
+
+    total_arquivadas = sum(
+        p["status"] == "Arquivada"
+        for p in plantas
+    )
+
+    st.caption(
+        f"{total_catalogo} no catálogo • "
+        f"{total_pendentes} pendentes • "
+        f"{total_arquivadas} arquivadas"
+    )
+
+    situacoes = st.multiselect(
+        "Situação",
+        STATUS,
+        default=[
+            "No catálogo",
+            "Pendente"
+        ]
+    )
+
+    grupo_filtro = st.selectbox(
+        "Luminosidade",
+        ["Todas"] + GRUPOS + [
+            "Não definida"
+        ]
+    )
+
+    busca = st.text_input(
+        "Buscar planta",
+        placeholder=(
+            "Nome comum ou científico"
+        )
+    )
+
+    visiveis = [
+        p for p in plantas
+        if p["status"] in situacoes
+        and (
+            grupo_filtro == "Todas"
+            or (
+                p["grupo"] == ""
+                if grupo_filtro == "Não definida"
+                else p["grupo"] == grupo_filtro
             )
+        )
+        and (
+            not busca
+            or busca.casefold() in (
+                p["nome_comum"]
+                + " "
+                + (p["nome_cientifico"] or "")
+            ).casefold()
+        )
+    ]
 
-            if filtro != "Todos":
+    if not visiveis:
+        st.info(
+            "Nenhuma planta corresponde aos filtros."
+        )
 
-                selecionados = [
-                    r for r in selecionados
-                    if r["grupo"] == filtro
-                ]
+    for planta in visiveis:
+        with st.container(border=True):
 
-        if not selecionados:
-            st.info(
-                "Nenhuma planta nesta seção."
-            )
-
-        for planta in selecionados:
-
-            with st.expander(
-                f"{planta['nome_comum']} • "
-                f"{planta['nome_cientifico'] or 'Não identificado'}"
-            ):
-
-                if planta["imagem"]:
-                    st.image(
-                        planta["imagem"],
-                        width=250
-                    )
-
-                if planta["score"] is not None:
-
-                    st.caption(
-                        f"Score original Pl@ntNet: "
-                        f"{planta['score'] * 100:.1f}%"
-                    )
-
-                st.caption(
-                    f"Registrada em {planta['criado_em']}"
+            if planta["imagem"]:
+                st.image(
+                    planta["imagem"],
+                    width=220
                 )
 
+            st.markdown(
+                f"**{planta['nome_comum']}**"
+            )
+
+            st.caption(
+                f"{planta['nome_cientifico'] or 'Sem identificação'}"
+                f" • {planta['grupo'] or 'Luminosidade não definida'}"
+                f" • {planta['status']}"
+            )
+
+            with st.expander(
+                "Ver e editar ficha"
+            ):
                 with st.form(
                     f"editar_{planta['id']}"
                 ):
-
-                    dados = campos_formulario(
+                    dados = ficha_campos(
                         f"edit_{planta['id']}_",
                         planta
                     )
 
-                    gravar = st.form_submit_button(
-                        "💾 Salvar alterações"
+                    gravar = (
+                        st.form_submit_button(
+                            "💾 Salvar alterações"
+                        )
                     )
 
                 if gravar:
-
                     if not dados["nome_comum"]:
-
                         st.error(
-                            "O nome comum não pode "
-                            "ficar vazio."
+                            "Informe um nome."
                         )
 
                     elif (
                         dados["status"] == "No catálogo"
                         and not dados["grupo"]
                     ):
-
                         st.error(
-                            "Selecione o grupo de "
-                            "luminosidade."
+                            "Defina a luminosidade "
+                            "ou mantenha como Pendente."
                         )
 
                     else:
-
                         atualizar(
                             planta["id"],
                             dados
@@ -614,19 +748,15 @@ for aba, situacao in [
 
                         st.rerun()
 
-                st.divider()
-
                 confirmar = st.checkbox(
-                    "Confirmo que quero excluir "
-                    "esta planta permanentemente",
+                    "Confirmo a exclusão definitiva",
                     key=f"confirmar_{planta['id']}"
                 )
 
                 if st.button(
-                    "🗑 Excluir definitivamente",
+                    "🗑 Excluir",
                     key=f"excluir_{planta['id']}",
                     disabled=not confirmar
                 ):
-
                     excluir(planta["id"])
                     st.rerun()
