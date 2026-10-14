@@ -23,12 +23,8 @@ API = "https://generativelanguage.googleapis.com/v1beta"
 
 GRUPOS = ["Sol pleno", "Luz indireta", "Pouca luz"]
 SOLOS = [
-    "Bem drenado",
-    "Orgânico",
-    "Úmido",
-    "Arenoso",
-    "Outro",
-    "Não definido"
+    "Bem drenado", "Orgânico", "Úmido",
+    "Arenoso", "Outro", "Não definido"
 ]
 TOXICIDADES = [
     "Não verificada",
@@ -36,17 +32,8 @@ TOXICIDADES = [
     "Tóxica",
     "Sem toxicidade conhecida"
 ]
-RARIDADES = [
-    "Não avaliada",
-    "Comum",
-    "Incomum",
-    "Rara"
-]
-STATUS = [
-    "Pendente",
-    "No catálogo",
-    "Arquivada"
-]
+RARIDADES = ["Não avaliada", "Comum", "Incomum", "Rara"]
+STATUS = ["Pendente", "No catálogo", "Arquivada"]
 
 PREFERIDOS = [
     "gemini-3.1-flash-lite",
@@ -205,12 +192,7 @@ def tratar_foto(arquivo):
     imagem.thumbnail((1200, 1200))
 
     buffer = io.BytesIO()
-    imagem.save(
-        buffer,
-        format="JPEG",
-        quality=82
-    )
-
+    imagem.save(buffer, format="JPEG", quality=82)
     return buffer.getvalue()
 
 
@@ -228,12 +210,7 @@ def imagem_quadrada(foto):
     )
 
     buffer = io.BytesIO()
-    imagem.save(
-        buffer,
-        format="JPEG",
-        quality=85
-    )
-
+    imagem.save(buffer, format="JPEG", quality=85)
     return buffer.getvalue()
 
 
@@ -263,8 +240,7 @@ def texto_erro(resposta):
 
     if chave:
         mensagem = mensagem.replace(
-            chave,
-            "[CHAVE OCULTA]"
+            chave, "[CHAVE OCULTA]"
         )
 
     return (
@@ -280,15 +256,9 @@ def modelo_elegivel(nome):
         return False
 
     proibidos = [
-        "image",
-        "tts",
-        "transcribe",
-        "audio",
-        "omni",
-        "robotics",
-        "computer-use",
-        "nano-banana",
-        "customtools"
+        "image", "tts", "transcribe", "audio",
+        "omni", "robotics", "computer-use",
+        "nano-banana", "customtools"
     ]
 
     if any(p in nome for p in proibidos):
@@ -334,9 +304,7 @@ def listar_modelos_elegiveis():
             )
 
             nome = item.get("name", "").replace(
-                "models/",
-                "",
-                1
+                "models/", "", 1
             )
 
             if (
@@ -564,13 +532,10 @@ def identificar_automaticamente(foto):
             )
 
             ficha, erro, interromper = consultar_modelo(
-                foto,
-                modelo
+                foto, modelo
             )
 
-            progresso.progress(
-                indice / len(modelos)
-            )
+            progresso.progress(indice / len(modelos))
 
             if ficha is not None:
                 st.session_state[
@@ -610,7 +575,7 @@ def identificar_automaticamente(foto):
 
 
 # =====================================================
-# PLANTNET
+# PLANTNET COM FOTOS DE REFERÊNCIA
 # =====================================================
 
 def consultar_plantnet(foto):
@@ -645,6 +610,121 @@ def consultar_plantnet(foto):
         )
 
     return resposta.json().get("results", [])
+
+
+def foto_referencia_plantnet(resultado):
+    """
+    Busca uma URL de imagem de referência
+    nos resultados da API Pl@ntNet.
+    """
+    imagens = resultado.get("images") or []
+
+    for imagem in imagens:
+        urls = imagem.get("url") or {}
+
+        if isinstance(urls, str):
+            if urls.startswith("https://"):
+                return urls
+
+        elif isinstance(urls, dict):
+            for tamanho in ["m", "o", "s"]:
+                url = urls.get(tamanho)
+
+                if (
+                    isinstance(url, str)
+                    and url.startswith("https://")
+                ):
+                    return url
+
+    return None
+
+
+def mostrar_resultados_plantnet(foto, resultados):
+    st.subheader("🔎 Comparação com Pl@ntNet")
+
+    st.caption(
+        "Compare sua fotografia com as imagens "
+        "de referência fornecidas pelo Pl@ntNet."
+    )
+
+    if not resultados:
+        st.info("Nenhuma sugestão encontrada.")
+        return
+
+    for indice, item in enumerate(resultados[:5], 1):
+        especie = item.get("species") or {}
+
+        nome = (
+            especie.get("scientificNameWithoutAuthor")
+            or especie.get("scientificName")
+            or "Espécie não informada"
+        )
+
+        nomes_comuns = (
+            especie.get("commonNames") or []
+        )
+
+        nome_popular = (
+            nomes_comuns[0]
+            if nomes_comuns else ""
+        )
+
+        score = float(item.get("score") or 0)
+
+        url_referencia = foto_referencia_plantnet(item)
+
+        with st.container(border=True):
+            st.markdown(
+                f"**{indice}. {nome}**"
+            )
+
+            if nome_popular:
+                st.caption(nome_popular)
+
+            st.write(
+                f"Correspondência estimada: "
+                f"**{score * 100:.1f}%**"
+            )
+
+            col_sua, col_ref = st.columns(
+                2, gap="medium"
+            )
+
+            with col_sua:
+                st.markdown("**Sua fotografia**")
+                st.image(
+                    foto,
+                    use_container_width=True
+                )
+
+            with col_ref:
+                st.markdown(
+                    "**Fotografia de referência**"
+                )
+
+                if url_referencia:
+                    try:
+                        st.image(
+                            url_referencia,
+                            use_container_width=True
+                        )
+                    except Exception:
+                        st.info(
+                            "A imagem de referência "
+                            "não pôde ser carregada."
+                        )
+                else:
+                    st.info(
+                        "O Pl@ntNet não forneceu "
+                        "fotografia de referência "
+                        "para este resultado."
+                    )
+
+    st.caption(
+        "As fotografias são referências visuais. "
+        "O percentual é um score do sistema, "
+        "não uma garantia de identificação."
+    )
 
 
 # =====================================================
@@ -969,13 +1049,11 @@ def indicadores_compactos(planta):
 
 
 def indicadores_detalhados(planta):
-    indicadores = dados_indicadores(planta)
-
     colunas = st.columns(4)
 
     for coluna, (icone, titulo, valor) in zip(
         colunas,
-        indicadores
+        dados_indicadores(planta)
     ):
         with coluna:
             st.markdown(
@@ -1001,13 +1079,9 @@ def abrir_ficha(planta):
     st.subheader(planta["nome_comum"])
 
     if planta.get("nome_cientifico"):
-        st.caption(
-            planta["nome_cientifico"]
-        )
+        st.caption(planta["nome_cientifico"])
 
-    st.caption(
-        f"Situação: {planta['status']}"
-    )
+    st.caption(f"Situação: {planta['status']}")
 
     if planta.get("imagem"):
         st.image(
@@ -1020,7 +1094,6 @@ def abrir_ficha(planta):
     st.divider()
 
     st.markdown("**Cuidados e cultivo**")
-
     st.text(
         texto(planta.get("cuidados"))
         or "Ficha não preenchida."
@@ -1058,9 +1131,7 @@ def abrir_ficha(planta):
             st.rerun()
 
     with st.expander("🗑️ Excluir planta"):
-        st.warning(
-            "A exclusão é definitiva."
-        )
+        st.warning("A exclusão é definitiva.")
 
         confirmar = st.checkbox(
             "Confirmo que desejo excluir esta planta",
@@ -1279,36 +1350,12 @@ with aba_identificar:
 
             if resultados is not None:
                 with st.expander(
-                    "Segunda opinião do Pl@ntNet",
+                    "🌿 Comparar com fotografias do Pl@ntNet",
                     expanded=True
                 ):
-                    if not resultados:
-                        st.info(
-                            "Nenhuma sugestão encontrada."
-                        )
-
-                    for item in resultados[:5]:
-                        especie = item.get("species") or {}
-
-                        nome = (
-                            especie.get(
-                                "scientificNameWithoutAuthor"
-                            )
-                            or especie.get("scientificName")
-                            or "Não informado"
-                        )
-
-                        score = float(
-                            item.get("score") or 0
-                        )
-
-                        st.write(
-                            f"*{nome}* • "
-                            f"score: {score * 100:.1f}%"
-                        )
-
-                    st.caption(
-                        "O score não confirma a espécie."
+                    mostrar_resultados_plantnet(
+                        foto,
+                        resultados
                     )
 
             ficha = st.session_state.get("ficha_ia")
@@ -1524,13 +1571,7 @@ with aba_catalogo:
     )
 
     if not visiveis:
-        st.info(
-            "Nenhuma planta encontrada."
-        )
-
-    # Galeria compacta, com 5 fotos por linha
-    # por padrão. Streamlit reorganiza as
-    # colunas em telas estreitas.
+        st.info("Nenhuma planta encontrada.")
 
     for inicio in range(
         0,
