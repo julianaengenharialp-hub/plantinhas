@@ -23,8 +23,12 @@ API = "https://generativelanguage.googleapis.com/v1beta"
 
 GRUPOS = ["Sol pleno", "Luz indireta", "Pouca luz"]
 SOLOS = [
-    "Bem drenado", "Orgânico", "Úmido",
-    "Arenoso", "Outro", "Não definido"
+    "Bem drenado",
+    "Orgânico",
+    "Úmido",
+    "Arenoso",
+    "Outro",
+    "Não definido"
 ]
 TOXICIDADES = [
     "Não verificada",
@@ -32,8 +36,17 @@ TOXICIDADES = [
     "Tóxica",
     "Sem toxicidade conhecida"
 ]
-RARIDADES = ["Não avaliada", "Comum", "Incomum", "Rara"]
-STATUS = ["Pendente", "No catálogo", "Arquivada"]
+RARIDADES = [
+    "Não avaliada",
+    "Comum",
+    "Incomum",
+    "Rara"
+]
+STATUS = [
+    "Pendente",
+    "No catálogo",
+    "Arquivada"
+]
 
 PREFERIDOS = [
     "gemini-3.1-flash-lite",
@@ -182,34 +195,34 @@ def plantas_salvas():
 
 
 # =====================================================
-# IMAGENS
+# FOTOGRAFIAS
 # =====================================================
 
 def tratar_foto(arquivo):
-    imagem = Image.open(arquivo).convert("RGB")
+    imagem = Image.open(arquivo)
+    imagem = ImageOps.exif_transpose(imagem)
+    imagem = imagem.convert("RGB")
     imagem.thumbnail((1200, 1200))
 
     buffer = io.BytesIO()
-    imagem.save(buffer, format="JPEG", quality=82)
+    imagem.save(
+        buffer,
+        format="JPEG",
+        quality=82
+    )
+
     return buffer.getvalue()
 
 
-@st.cache_data(show_spinner=False, max_entries=150)
+@st.cache_data(show_spinner=False, max_entries=200)
 def imagem_quadrada(foto):
-    """
-    Cria uma miniatura quadrada para a galeria.
-
-    O recorte é feito somente na cópia usada
-    para exibição. A imagem salva no banco
-    permanece inalterada.
-    """
     imagem = Image.open(io.BytesIO(foto))
     imagem = ImageOps.exif_transpose(imagem)
     imagem = imagem.convert("RGB")
 
     imagem = ImageOps.fit(
         imagem,
-        (600, 600),
+        (400, 400),
         method=Image.Resampling.LANCZOS,
         centering=(0.5, 0.5)
     )
@@ -218,7 +231,7 @@ def imagem_quadrada(foto):
     imagem.save(
         buffer,
         format="JPEG",
-        quality=88
+        quality=85
     )
 
     return buffer.getvalue()
@@ -250,7 +263,8 @@ def texto_erro(resposta):
 
     if chave:
         mensagem = mensagem.replace(
-            chave, "[CHAVE OCULTA]"
+            chave,
+            "[CHAVE OCULTA]"
         )
 
     return (
@@ -320,7 +334,9 @@ def listar_modelos_elegiveis():
             )
 
             nome = item.get("name", "").replace(
-                "models/", "", 1
+                "models/",
+                "",
+                1
             )
 
             if (
@@ -409,7 +425,8 @@ Regras:
 - Não invente dados de toxicidade.
 - Diferencie cães, gatos e coelhos.
 - Declare quando a segurança não for conhecida.
-- Ausência de dados não significa não toxicidade.
+- Ausência de dados não significa ausência
+  de toxicidade.
 - Raridade significa frequência no cultivo
   ornamental brasileiro, não ameaça de extinção.
 - Não confunda aparência exótica com raridade.
@@ -461,9 +478,7 @@ def consultar_modelo(foto, modelo):
         )
 
     if not resposta.ok:
-        codigo = resposta.status_code
-
-        interromper = codigo in (
+        interromper = resposta.status_code in (
             401, 403, 429
         )
 
@@ -478,11 +493,7 @@ def consultar_modelo(foto, modelo):
         candidatos = retorno.get("candidates") or []
 
         if not candidatos:
-            return (
-                None,
-                "Resposta sem candidatos.",
-                False
-            )
+            return None, "Resposta sem candidatos.", False
 
         candidato = candidatos[0]
 
@@ -553,7 +564,8 @@ def identificar_automaticamente(foto):
             )
 
             ficha, erro, interromper = consultar_modelo(
-                foto, modelo
+                foto,
+                modelo
             )
 
             progresso.progress(
@@ -636,7 +648,7 @@ def consultar_plantnet(foto):
 
 
 # =====================================================
-# FICHAS E FORMULÁRIOS
+# FUNÇÕES AUXILIARES
 # =====================================================
 
 def texto(valor):
@@ -853,7 +865,9 @@ def inicial_da_ficha(ficha):
         ),
         "familia": ficha.get("familia") or "",
         "grupo": escolha(
-            ficha.get("grupo"), GRUPOS, ""
+            ficha.get("grupo"),
+            GRUPOS,
+            ""
         ),
         "solo_tipo": escolha(
             ficha.get("solo_tipo"),
@@ -878,175 +892,236 @@ def inicial_da_ficha(ficha):
 
 
 # =====================================================
-# CARTÕES DO CATÁLOGO
+# INDICADORES VISUAIS
 # =====================================================
 
-def indicador(icone, titulo, valor):
+def dados_indicadores(planta):
+    luz = planta.get("grupo") or "Não definida"
+    solo = planta.get("solo_tipo") or "Não definido"
+    tox = planta.get("toxicidade") or "Não verificada"
+    rar = planta.get("raridade") or "Não avaliada"
+
+    return [
+        (
+            {
+                "Sol pleno": "☀️",
+                "Luz indireta": "🌤️",
+                "Pouca luz": "🌥️"
+            }.get(luz, "❔"),
+            "Luz",
+            luz
+        ),
+        (
+            {
+                "Bem drenado": "🏜️",
+                "Orgânico": "🌱",
+                "Úmido": "💧",
+                "Arenoso": "⏳"
+            }.get(solo, "🪴"),
+            "Solo",
+            solo
+        ),
+        (
+            {
+                "Não verificada": "❔",
+                "Potencialmente tóxica": "⚠️",
+                "Tóxica": "☠️",
+                "Sem toxicidade conhecida": "🛡️"
+            }.get(tox, "❔"),
+            "Toxicidade",
+            tox
+        ),
+        (
+            {
+                "Não avaliada": "❔",
+                "Comum": "🌿",
+                "Incomum": "💎",
+                "Rara": "✨"
+            }.get(rar, "❔"),
+            "Raridade",
+            rar
+        )
+    ]
+
+
+def indicadores_compactos(planta):
+    indicadores = dados_indicadores(planta)
+
+    simbolos = " ".join(
+        icone for icone, _, _ in indicadores
+    )
+
+    descricao = " | ".join(
+        f"{titulo}: {valor}"
+        for _, titulo, valor in indicadores
+    )
+
     st.markdown(
         "<div style='text-align:center;"
-        "min-height:85px'>"
-        f"<div style='font-size:25px'>{icone}</div>"
-        f"<div style='font-size:11px;font-weight:600'>"
-        f"{escape(titulo)}</div>"
-        f"<div style='font-size:11px'>"
-        f"{escape(valor)}</div>"
+        "font-size:19px;letter-spacing:2px;"
+        "margin:3px 0'>"
+        f"{simbolos}"
         "</div>",
         unsafe_allow_html=True
     )
 
+    st.caption(descricao)
 
-def cartao_planta(planta):
-    id_ = planta["id"]
 
-    with st.container(border=True):
+def indicadores_detalhados(planta):
+    indicadores = dados_indicadores(planta)
 
-        # FOTO QUADRADA PADRONIZADA
-        if planta.get("imagem"):
-            try:
-                miniatura = imagem_quadrada(
-                    planta["imagem"]
-                )
+    colunas = st.columns(4)
 
-                st.image(
-                    miniatura,
-                    use_container_width=True
-                )
-
-            except (OSError, ValueError):
-                st.caption(
-                    "Imagem indisponível."
-                )
-        else:
-            st.info("Planta sem fotografia.")
-
-        st.markdown(
-            f"**{planta['nome_comum']}**"
-        )
-
-        st.caption(
-            texto(planta.get("nome_cientifico"))
-            or "Identificação pendente"
-        )
-
-        st.caption(
-            "🟡 Pendente"
-            if planta["status"] == "Pendente"
-            else (
-                "📦 Arquivada"
-                if planta["status"] == "Arquivada"
-                else "🌿 No catálogo"
+    for coluna, (icone, titulo, valor) in zip(
+        colunas,
+        indicadores
+    ):
+        with coluna:
+            st.markdown(
+                "<div style='text-align:center'>"
+                f"<div style='font-size:27px'>{icone}</div>"
+                f"<div style='font-size:12px'>"
+                f"<b>{escape(titulo)}</b></div>"
+                f"<div style='font-size:12px'>"
+                f"{escape(valor)}</div>"
+                "</div>",
+                unsafe_allow_html=True
             )
-        )
-
-        luz = planta.get("grupo") or "Não definida"
-        solo = planta.get("solo_tipo") or "Não definido"
-        tox = planta.get("toxicidade") or "Não verificada"
-        rar = planta.get("raridade") or "Não avaliada"
-
-        colunas = st.columns(4, gap="small")
-
-        with colunas[0]:
-            indicador(
-                {
-                    "Sol pleno": "☀️",
-                    "Luz indireta": "🌤️",
-                    "Pouca luz": "🌥️"
-                }.get(luz, "❔"),
-                "LUZ",
-                luz
-            )
-
-        with colunas[1]:
-            indicador(
-                {
-                    "Bem drenado": "🏜️",
-                    "Orgânico": "🌱",
-                    "Úmido": "💧",
-                    "Arenoso": "⏳"
-                }.get(solo, "🪴"),
-                "SOLO",
-                solo
-            )
-
-        with colunas[2]:
-            indicador(
-                {
-                    "Não verificada": "❔",
-                    "Potencialmente tóxica": "⚠️",
-                    "Tóxica": "☠️",
-                    "Sem toxicidade conhecida": "🛡️"
-                }.get(tox, "❔"),
-                "TOXIC.",
-                tox
-            )
-
-        with colunas[3]:
-            indicador(
-                {
-                    "Não avaliada": "❔",
-                    "Comum": "🌿",
-                    "Incomum": "💎",
-                    "Rara": "✨"
-                }.get(rar, "❔"),
-                "RARIDADE",
-                rar
-            )
-
-        with st.expander("📖 Ficha completa"):
-
-            # Exibe a fotografia original sem recorte
-            if planta.get("imagem"):
-                st.image(
-                    planta["imagem"],
-                    use_container_width=True
-                )
-
-            st.text(
-                texto(planta.get("cuidados"))
-                or "Ficha não preenchida."
-            )
-
-            if planta.get("justificativa_raridade"):
-                st.markdown("**Raridade**")
-                st.write(
-                    planta["justificativa_raridade"]
-                )
-
-            if planta.get("observacoes"):
-                st.markdown("**Observações**")
-                st.write(planta["observacoes"])
-
-        with st.expander("✏️ Editar planta"):
-            with st.form(f"editar_{id_}"):
-                dados = campos_formulario(
-                    f"edit_{id_}_",
-                    planta
-                )
-
-                gravar = st.form_submit_button(
-                    "💾 Salvar alterações"
-                )
-
-            if gravar and validar(dados):
-                atualizar(id_, dados)
-                st.rerun()
-
-            confirmar = st.checkbox(
-                "Confirmo a exclusão definitiva",
-                key=f"confirmar_{id_}"
-            )
-
-            if st.button(
-                "Excluir planta",
-                key=f"excluir_{id_}",
-                disabled=not confirmar
-            ):
-                excluir(id_)
-                st.rerun()
 
 
 # =====================================================
-# APLICATIVO
+# JANELA DA FICHA
+# =====================================================
+
+@st.dialog("🌿 Ficha da planta", width="large")
+def abrir_ficha(planta):
+    id_ = planta["id"]
+
+    st.subheader(planta["nome_comum"])
+
+    if planta.get("nome_cientifico"):
+        st.caption(
+            planta["nome_cientifico"]
+        )
+
+    st.caption(
+        f"Situação: {planta['status']}"
+    )
+
+    if planta.get("imagem"):
+        st.image(
+            planta["imagem"],
+            use_container_width=True
+        )
+
+    indicadores_detalhados(planta)
+
+    st.divider()
+
+    st.markdown("**Cuidados e cultivo**")
+
+    st.text(
+        texto(planta.get("cuidados"))
+        or "Ficha não preenchida."
+    )
+
+    if planta.get("justificativa_raridade"):
+        st.markdown("**Raridade**")
+        st.write(
+            planta["justificativa_raridade"]
+        )
+
+    if planta.get("observacoes"):
+        st.markdown("**Minhas observações**")
+        st.write(planta["observacoes"])
+
+    st.caption(
+        "Informações geradas por IA devem ser "
+        "verificadas, especialmente a toxicidade."
+    )
+
+    with st.expander("✏️ Editar esta planta"):
+        with st.form(f"editar_{id_}"):
+            dados = campos_formulario(
+                f"edit_{id_}_",
+                planta
+            )
+
+            gravar = st.form_submit_button(
+                "💾 Salvar alterações",
+                type="primary"
+            )
+
+        if gravar and validar(dados):
+            atualizar(id_, dados)
+            st.rerun()
+
+    with st.expander("🗑️ Excluir planta"):
+        st.warning(
+            "A exclusão é definitiva."
+        )
+
+        confirmar = st.checkbox(
+            "Confirmo que desejo excluir esta planta",
+            key=f"confirmar_{id_}"
+        )
+
+        if st.button(
+            "Excluir definitivamente",
+            key=f"excluir_{id_}",
+            disabled=not confirmar
+        ):
+            excluir(id_)
+            st.rerun()
+
+
+# =====================================================
+# CARTÃO COMPACTO
+# =====================================================
+
+def cartao_compacto(planta):
+    with st.container(border=True):
+        if planta.get("imagem"):
+            try:
+                st.image(
+                    imagem_quadrada(planta["imagem"]),
+                    use_container_width=True
+                )
+            except (OSError, ValueError):
+                st.caption("Imagem indisponível")
+        else:
+            st.info("Sem foto")
+
+        nome = texto(planta.get("nome_comum"))
+
+        st.markdown(
+            "<div style='text-align:center;"
+            "font-size:13px;font-weight:650;"
+            "min-height:40px;line-height:1.3;"
+            "overflow-wrap:anywhere'>"
+            f"{escape(nome)}"
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+        if planta["status"] == "Pendente":
+            st.caption("🟡 Pendente")
+        elif planta["status"] == "Arquivada":
+            st.caption("📦 Arquivada")
+
+        indicadores_compactos(planta)
+
+        if st.button(
+            "Ver ficha",
+            key=f"abrir_{planta['id']}",
+            use_container_width=True
+        ):
+            abrir_ficha(planta)
+
+
+# =====================================================
+# INICIALIZAÇÃO
 # =====================================================
 
 preparar_banco()
@@ -1067,7 +1142,7 @@ aba_identificar, aba_catalogo = st.tabs([
 
 
 # =====================================================
-# IDENTIFICAR PLANTA
+# IDENTIFICAÇÃO
 # =====================================================
 
 with aba_identificar:
@@ -1327,7 +1402,7 @@ with aba_identificar:
 
 
 # =====================================================
-# CATÁLOGO VISUAL
+# CATÁLOGO COMPACTO
 # =====================================================
 
 with aba_catalogo:
@@ -1361,10 +1436,20 @@ with aba_catalogo:
 
     st.subheader("Minha coleção")
 
-    busca = st.text_input(
-        "🔎 Buscar planta",
-        placeholder="Nome popular ou científico"
-    )
+    barra1, barra2 = st.columns([3, 1])
+
+    with barra1:
+        busca = st.text_input(
+            "🔎 Buscar planta",
+            placeholder="Nome popular ou científico"
+        )
+
+    with barra2:
+        colunas_galeria = st.selectbox(
+            "Fotos por linha",
+            [5, 6, 4, 3],
+            index=0
+        )
 
     with st.expander("🎛️ Filtrar coleção"):
         f1, f2 = st.columns(2)
@@ -1439,20 +1524,37 @@ with aba_catalogo:
     )
 
     if not visiveis:
-        st.info("Nenhuma planta encontrada.")
+        st.info(
+            "Nenhuma planta encontrada."
+        )
 
-    for inicio in range(0, len(visiveis), 2):
-        colunas = st.columns(2, gap="medium")
+    # Galeria compacta, com 5 fotos por linha
+    # por padrão. Streamlit reorganiza as
+    # colunas em telas estreitas.
+
+    for inicio in range(
+        0,
+        len(visiveis),
+        colunas_galeria
+    ):
+        linha = visiveis[
+            inicio:inicio + colunas_galeria
+        ]
+
+        colunas = st.columns(
+            colunas_galeria,
+            gap="small"
+        )
 
         for coluna, planta in zip(
             colunas,
-            visiveis[inicio:inicio + 2]
+            linha
         ):
             with coluna:
-                cartao_planta(planta)
+                cartao_compacto(planta)
 
     st.caption(
-        "As imagens do catálogo são exibidas "
-        "em formato quadrado. A fotografia "
-        "original permanece preservada na ficha."
+        "Clique em 'Ver ficha' para ampliar "
+        "a fotografia e consultar ou editar "
+        "os cuidados da planta."
     )
