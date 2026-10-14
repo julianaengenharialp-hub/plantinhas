@@ -3,13 +3,13 @@ import base64
 import hashlib
 import io
 import json
-import re
 import sqlite3
 from datetime import datetime
+from html import escape
 
 import requests
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageOps
 
 
 st.set_page_config(
@@ -50,9 +50,9 @@ PREFERIDOS = [
 ]
 
 
-# ============================================================
-# BANCO
-# ============================================================
+# =====================================================
+# BANCO DE DADOS
+# =====================================================
 
 def conectar():
     con = sqlite3.connect(DB, timeout=20)
@@ -80,7 +80,8 @@ def preparar_banco():
         """)
 
         existentes = {
-            r["name"] for r in con.execute(
+            r["name"]
+            for r in con.execute(
                 "PRAGMA table_info(catalogo_v04)"
             )
         }
@@ -173,15 +174,16 @@ def excluir(id_):
 def plantas_salvas():
     with conectar() as con:
         return [
-            dict(r) for r in con.execute(
+            dict(r)
+            for r in con.execute(
                 "SELECT * FROM catalogo_v04 ORDER BY id DESC"
             )
         ]
 
 
-# ============================================================
-# IMAGEM
-# ============================================================
+# =====================================================
+# IMAGENS
+# =====================================================
 
 def tratar_foto(arquivo):
     imagem = Image.open(arquivo).convert("RGB")
@@ -189,13 +191,42 @@ def tratar_foto(arquivo):
 
     buffer = io.BytesIO()
     imagem.save(buffer, format="JPEG", quality=82)
+    return buffer.getvalue()
+
+
+@st.cache_data(show_spinner=False, max_entries=150)
+def imagem_quadrada(foto):
+    """
+    Cria uma miniatura quadrada para a galeria.
+
+    O recorte é feito somente na cópia usada
+    para exibição. A imagem salva no banco
+    permanece inalterada.
+    """
+    imagem = Image.open(io.BytesIO(foto))
+    imagem = ImageOps.exif_transpose(imagem)
+    imagem = imagem.convert("RGB")
+
+    imagem = ImageOps.fit(
+        imagem,
+        (600, 600),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5)
+    )
+
+    buffer = io.BytesIO()
+    imagem.save(
+        buffer,
+        format="JPEG",
+        quality=88
+    )
 
     return buffer.getvalue()
 
 
-# ============================================================
+# =====================================================
 # GEMINI AUTOMÁTICO
-# ============================================================
+# =====================================================
 
 def chave_gemini():
     chave = st.secrets.get("GEMINI_API_KEY")
@@ -222,15 +253,13 @@ def texto_erro(resposta):
             chave, "[CHAVE OCULTA]"
         )
 
-    return f"HTTP {resposta.status_code}: {mensagem[:350]}"
+    return (
+        f"HTTP {resposta.status_code}: "
+        f"{mensagem[:350]}"
+    )
 
 
 def modelo_elegivel(nome):
-    """
-    Mantém modelos de texto multimodal,
-    excluindo modalidades especializadas.
-    """
-
     nome = nome.lower()
 
     if not nome.startswith("gemini-"):
@@ -251,16 +280,10 @@ def modelo_elegivel(nome):
     if any(p in nome for p in proibidos):
         return False
 
-    # Os modelos Flash são preferidos para o
-    # uso gratuito. Pro fica fora da varredura
-    # automática para evitar modelos sem cota.
     if "pro" in nome:
         return False
 
-    return (
-        "flash" in nome
-        or "lite" in nome
-    )
+    return "flash" in nome or "lite" in nome
 
 
 def listar_modelos_elegiveis():
@@ -284,16 +307,17 @@ def listar_modelos_elegiveis():
 
         if not resposta.ok:
             raise ValueError(
-                "Não foi possível consultar modelos: "
+                "Falha ao consultar modelos: "
                 + texto_erro(resposta)
             )
 
         corpo = resposta.json()
 
         for item in corpo.get("models", []):
-            metodos = item.get(
-                "supportedGenerationMethods"
-            ) or []
+            metodos = (
+                item.get("supportedGenerationMethods")
+                or []
+            )
 
             nome = item.get("name", "").replace(
                 "models/", "", 1
@@ -315,7 +339,6 @@ def listar_modelos_elegiveis():
     def prioridade(nome):
         if nome in PREFERIDOS:
             return (0, PREFERIDOS.index(nome))
-
         return (1, nome)
 
     encontrados.sort(key=prioridade)
@@ -380,20 +403,20 @@ Regras:
 - Não invente porcentagens de confiança.
 - Justifique a identificação com características
   observáveis na imagem.
-- Informe cuidados de luminosidade, rega,
-  substrato, crescimento, porte adulto,
-  propagação, adubação e problemas comuns.
+- Informe luminosidade, rega, substrato,
+  crescimento, porte adulto, propagação,
+  adubação e problemas comuns.
 - Não invente dados de toxicidade.
-- Diferencie cães, gatos e coelhos e declare
-  quando a segurança não for conhecida.
-- "Não verificada" não significa não tóxica.
+- Diferencie cães, gatos e coelhos.
+- Declare quando a segurança não for conhecida.
+- Ausência de dados não significa não toxicidade.
 - Raridade significa frequência no cultivo
   ornamental brasileiro, não ameaça de extinção.
 - Não confunda aparência exótica com raridade.
-- Se não houver fundamento para a raridade,
+- Se não houver fundamento para raridade,
   use "Não avaliada".
 - Não afirme ter consultado fontes externas.
-- Não preencha lacunas com afirmações inventadas.
+- Não preencha lacunas com informações inventadas.
 """
 
 
@@ -430,17 +453,19 @@ def consultar_modelo(foto, modelo):
             timeout=90
         )
     except requests.RequestException as erro:
-        return None, (
+        return (
+            None,
             "Falha de conexão: "
-            + type(erro).__name__
-        ), False
+            + type(erro).__name__,
+            False
+        )
 
     if not resposta.ok:
         codigo = resposta.status_code
 
-        # Erros de cota/autenticação interrompem
-        # a varredura para proteger o projeto.
-        interromper = codigo in (401, 403, 429)
+        interromper = codigo in (
+            401, 403, 429
+        )
 
         return (
             None,
@@ -460,6 +485,7 @@ def consultar_modelo(foto, modelo):
             )
 
         candidato = candidatos[0]
+
         partes = candidato.get(
             "content", {}
         ).get("parts", [])
@@ -482,7 +508,7 @@ def consultar_modelo(foto, modelo):
         if not isinstance(ficha, dict):
             return (
                 None,
-                "A resposta não é um objeto JSON.",
+                "Resposta não é um objeto JSON.",
                 False
             )
 
@@ -492,7 +518,7 @@ def consultar_modelo(foto, modelo):
         ):
             return (
                 None,
-                "Ficha sem identificação botânica.",
+                "Ficha sem identificação.",
                 False
             )
 
@@ -501,8 +527,7 @@ def consultar_modelo(foto, modelo):
     except (ValueError, TypeError, KeyError):
         return (
             None,
-            "Resposta recebida, mas ficha inválida "
-            "ou incompleta.",
+            "Ficha inválida ou incompleta.",
             False
         )
 
@@ -513,7 +538,7 @@ def identificar_automaticamente(foto):
     if not modelos:
         raise ValueError(
             "Nenhum modelo Gemini Flash compatível "
-            "foi anunciado para esta chave."
+            "foi encontrado."
         )
 
     tentativas = []
@@ -565,20 +590,16 @@ def identificar_automaticamente(foto):
         "diagnostico_gemini"
     ] = tentativas
 
-    ultimo = tentativas[-1] if tentativas else {}
-
     raise ValueError(
         "Nenhum modelo conseguiu gerar a ficha. "
-        f"Foram realizadas {len(tentativas)} tentativa(s). "
-        "Consulte o diagnóstico abaixo. "
-        "Último resultado: "
-        + str(ultimo.get("resultado", "Desconhecido"))
+        f"Foram realizadas {len(tentativas)} "
+        "tentativa(s). Consulte o diagnóstico."
     )
 
 
-# ============================================================
+# =====================================================
 # PLANTNET
-# ============================================================
+# =====================================================
 
 def consultar_plantnet(foto):
     chave = st.secrets.get("PLANTNET_API_KEY")
@@ -596,7 +617,9 @@ def consultar_plantnet(foto):
         },
         files={
             "images": (
-                "planta.jpg", foto, "image/jpeg"
+                "planta.jpg",
+                foto,
+                "image/jpeg"
             )
         },
         data={"organs": "auto"},
@@ -612,9 +635,9 @@ def consultar_plantnet(foto):
     return resposta.json().get("results", [])
 
 
-# ============================================================
+# =====================================================
 # FICHAS E FORMULÁRIOS
-# ============================================================
+# =====================================================
 
 def texto(valor):
     return "" if valor is None else str(valor)
@@ -764,7 +787,10 @@ def campos_formulario(prefixo, inicial):
         "nome_comum": nome.strip(),
         "nome_cientifico": cientifico.strip(),
         "familia": familia.strip(),
-        "grupo": "" if luz == "Não definida" else luz,
+        "grupo": (
+            "" if luz == "Não definida"
+            else luz
+        ),
         "solo_tipo": solo,
         "toxicidade": toxicidade,
         "raridade": raridade,
@@ -851,9 +877,9 @@ def inicial_da_ficha(ficha):
     }
 
 
-# ============================================================
-# CATÁLOGO VISUAL
-# ============================================================
+# =====================================================
+# CARTÕES DO CATÁLOGO
+# =====================================================
 
 def indicador(icone, titulo, valor):
     st.markdown(
@@ -861,8 +887,9 @@ def indicador(icone, titulo, valor):
         "min-height:85px'>"
         f"<div style='font-size:25px'>{icone}</div>"
         f"<div style='font-size:11px;font-weight:600'>"
-        f"{titulo}</div>"
-        f"<div style='font-size:11px'>{valor}</div>"
+        f"{escape(titulo)}</div>"
+        f"<div style='font-size:11px'>"
+        f"{escape(valor)}</div>"
         "</div>",
         unsafe_allow_html=True
     )
@@ -872,11 +899,25 @@ def cartao_planta(planta):
     id_ = planta["id"]
 
     with st.container(border=True):
+
+        # FOTO QUADRADA PADRONIZADA
         if planta.get("imagem"):
-            st.image(
-                planta["imagem"],
-                use_container_width=True
-            )
+            try:
+                miniatura = imagem_quadrada(
+                    planta["imagem"]
+                )
+
+                st.image(
+                    miniatura,
+                    use_container_width=True
+                )
+
+            except (OSError, ValueError):
+                st.caption(
+                    "Imagem indisponível."
+                )
+        else:
+            st.info("Planta sem fotografia.")
 
         st.markdown(
             f"**{planta['nome_comum']}**"
@@ -911,7 +952,8 @@ def cartao_planta(planta):
                     "Luz indireta": "🌤️",
                     "Pouca luz": "🌥️"
                 }.get(luz, "❔"),
-                "LUZ", luz
+                "LUZ",
+                luz
             )
 
         with colunas[1]:
@@ -922,7 +964,8 @@ def cartao_planta(planta):
                     "Úmido": "💧",
                     "Arenoso": "⏳"
                 }.get(solo, "🪴"),
-                "SOLO", solo
+                "SOLO",
+                solo
             )
 
         with colunas[2]:
@@ -933,7 +976,8 @@ def cartao_planta(planta):
                     "Tóxica": "☠️",
                     "Sem toxicidade conhecida": "🛡️"
                 }.get(tox, "❔"),
-                "TOXIC.", tox
+                "TOXIC.",
+                tox
             )
 
         with colunas[3]:
@@ -944,10 +988,19 @@ def cartao_planta(planta):
                     "Incomum": "💎",
                     "Rara": "✨"
                 }.get(rar, "❔"),
-                "RARIDADE", rar
+                "RARIDADE",
+                rar
             )
 
         with st.expander("📖 Ficha completa"):
+
+            # Exibe a fotografia original sem recorte
+            if planta.get("imagem"):
+                st.image(
+                    planta["imagem"],
+                    use_container_width=True
+                )
+
             st.text(
                 texto(planta.get("cuidados"))
                 or "Ficha não preenchida."
@@ -992,9 +1045,9 @@ def cartao_planta(planta):
                 st.rerun()
 
 
-# ============================================================
+# =====================================================
 # APLICATIVO
-# ============================================================
+# =====================================================
 
 preparar_banco()
 
@@ -1013,9 +1066,9 @@ aba_identificar, aba_catalogo = st.tabs([
 ])
 
 
-# ============================================================
-# IDENTIFICAR
-# ============================================================
+# =====================================================
+# IDENTIFICAR PLANTA
+# =====================================================
 
 with aba_identificar:
     modelo_ativo = st.session_state.get(
@@ -1024,13 +1077,13 @@ with aba_identificar:
 
     if modelo_ativo:
         st.caption(
-            f"Gemini automático • "
+            "Gemini automático • "
             f"Último modelo funcional: {modelo_ativo}"
         )
     else:
         st.caption(
-            "Gemini automático • O aplicativo "
-            "selecionará um modelo compatível."
+            "Gemini automático • Seleção "
+            "automática de modelo compatível."
         )
 
     origem = st.radio(
@@ -1085,8 +1138,7 @@ with aba_identificar:
                 ):
                     try:
                         with st.spinner(
-                            "Procurando um modelo Gemini "
-                            "compatível e analisando a planta..."
+                            "Identificando a planta..."
                         ):
                             ficha, modelo_usado = (
                                 identificar_automaticamente(foto)
@@ -1094,7 +1146,8 @@ with aba_identificar:
 
                         st.session_state["ficha_ia"] = ficha
                         st.session_state.pop(
-                            "foto_salva", None
+                            "foto_salva",
+                            None
                         )
 
                         st.success(
@@ -1204,9 +1257,9 @@ with aba_identificar:
                     or "Não informada."
                 )
 
-                alternativas = ficha.get(
-                    "alternativas"
-                ) or []
+                alternativas = (
+                    ficha.get("alternativas") or []
+                )
 
                 if (
                     isinstance(alternativas, list)
@@ -1273,9 +1326,9 @@ with aba_identificar:
             )
 
 
-# ============================================================
-# CATÁLOGO
-# ============================================================
+# =====================================================
+# CATÁLOGO VISUAL
+# =====================================================
 
 with aba_catalogo:
     plantas = plantas_salvas()
@@ -1386,9 +1439,7 @@ with aba_catalogo:
     )
 
     if not visiveis:
-        st.info(
-            "Nenhuma planta encontrada."
-        )
+        st.info("Nenhuma planta encontrada.")
 
     for inicio in range(0, len(visiveis), 2):
         colunas = st.columns(2, gap="medium")
@@ -1401,8 +1452,7 @@ with aba_catalogo:
                 cartao_planta(planta)
 
     st.caption(
-        "Os indicadores resumem informações "
-        "editáveis. 'Não verificada' não significa "
-        "segura para animais. Raridade refere-se "
-        "ao cultivo ornamental, não à conservação."
+        "As imagens do catálogo são exibidas "
+        "em formato quadrado. A fotografia "
+        "original permanece preservada na ficha."
     )
