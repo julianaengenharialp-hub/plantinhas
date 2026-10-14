@@ -9,8 +9,30 @@ from html import escape
 
 import requests
 import streamlit as st
-from PIL import Image, ImageOps
+from PIL import Image, ImageOps, ImageChops, ImageStat
 
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    Image as PDFImage,
+    KeepTogether,
+    PageBreak,
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+
+# =====================================================
+# CONFIGURAÇÃO
+# =====================================================
 
 st.set_page_config(
     page_title="Meu Jardim",
@@ -21,19 +43,40 @@ st.set_page_config(
 DB = "plantas.db"
 API = "https://generativelanguage.googleapis.com/v1beta"
 
-GRUPOS = ["Sol pleno", "Luz indireta", "Pouca luz"]
-SOLOS = [
-    "Bem drenado", "Orgânico", "Úmido",
-    "Arenoso", "Outro", "Não definido"
+GRUPOS = [
+    "Sol pleno",
+    "Luz indireta",
+    "Pouca luz"
 ]
+
+SOLOS = [
+    "Bem drenado",
+    "Orgânico",
+    "Úmido",
+    "Arenoso",
+    "Outro",
+    "Não definido"
+]
+
 TOXICIDADES = [
     "Não verificada",
     "Potencialmente tóxica",
     "Tóxica",
     "Sem toxicidade conhecida"
 ]
-RARIDADES = ["Não avaliada", "Comum", "Incomum", "Rara"]
-STATUS = ["Pendente", "No catálogo", "Arquivada"]
+
+RARIDADES = [
+    "Não avaliada",
+    "Comum",
+    "Incomum",
+    "Rara"
+]
+
+STATUS = [
+    "Pendente",
+    "No catálogo",
+    "Arquivada"
+]
 
 PREFERIDOS = [
     "gemini-3.1-flash-lite",
@@ -48,6 +91,112 @@ PREFERIDOS = [
     "gemini-2.5-flash-lite",
     "gemini-2.5-flash"
 ]
+
+
+# =====================================================
+# ESTILO
+# =====================================================
+
+st.markdown(
+    """
+    <style>
+    .resumo-jardim {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin: 10px 0 25px;
+    }
+
+    .resumo-item {
+        padding: 14px 12px;
+        border: 1px solid rgba(128,128,128,0.25);
+        border-radius: 12px;
+        text-align: center;
+        min-width: 0;
+    }
+
+    .resumo-numero {
+        font-size: 32px;
+        font-weight: 650;
+        line-height: 1.2;
+        margin-top: 7px;
+    }
+
+    .resumo-legenda {
+        font-size: 13px;
+        line-height: 1.3;
+    }
+
+    .simbolos-planta {
+        text-align: center;
+        font-size: 18px;
+        letter-spacing: 1px;
+        white-space: nowrap;
+        margin: 4px 0;
+    }
+
+    .nome-planta {
+        text-align: center;
+        font-size: 13px;
+        font-weight: 650;
+        line-height: 1.3;
+        min-height: 36px;
+        overflow-wrap: anywhere;
+    }
+
+    @media (max-width: 700px) {
+        .resumo-jardim {
+            gap: 6px;
+        }
+
+        .resumo-item {
+            padding: 11px 4px;
+        }
+
+        .resumo-numero {
+            font-size: 26px;
+        }
+
+        .resumo-legenda {
+            font-size: 11px;
+        }
+
+        .simbolos-planta {
+            font-size: 16px;
+            letter-spacing: 0;
+        }
+
+        [class*="st-key-galeria_responsiva"]
+        [data-testid="stHorizontalBlock"] {
+            flex-direction: row !important;
+            flex-wrap: wrap !important;
+            align-items: stretch !important;
+            gap: 8px !important;
+        }
+
+        [class*="st-key-galeria_responsiva"]
+        [data-testid="column"] {
+            flex: 0 0 calc(50% - 4px) !important;
+            width: calc(50% - 4px) !important;
+            min-width: 0 !important;
+        }
+
+        [class*="st-key-galeria_responsiva"]
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            min-width: 0 !important;
+        }
+
+        [class*="st-key-galeria_responsiva"]
+        [data-testid="stButton"] button {
+            font-size: 12px;
+            padding-left: 4px;
+            padding-right: 4px;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
 
 # =====================================================
@@ -192,7 +341,12 @@ def tratar_foto(arquivo):
     imagem.thumbnail((1200, 1200))
 
     buffer = io.BytesIO()
-    imagem.save(buffer, format="JPEG", quality=82)
+    imagem.save(
+        buffer,
+        format="JPEG",
+        quality=82
+    )
+
     return buffer.getvalue()
 
 
@@ -210,8 +364,39 @@ def imagem_quadrada(foto):
     )
 
     buffer = io.BytesIO()
-    imagem.save(buffer, format="JPEG", quality=85)
+    imagem.save(
+        buffer,
+        format="JPEG",
+        quality=85
+    )
+
     return buffer.getvalue()
+
+
+def imagem_comparacao(foto):
+    imagem = Image.open(io.BytesIO(foto))
+    imagem = ImageOps.exif_transpose(imagem)
+    imagem = imagem.convert("RGB")
+
+    return ImageOps.fit(
+        imagem,
+        (96, 96),
+        method=Image.Resampling.LANCZOS
+    )
+
+
+def imagens_praticamente_iguais(foto1, foto2):
+    try:
+        a = imagem_comparacao(foto1)
+        b = imagem_comparacao(foto2)
+
+        diferenca = ImageChops.difference(a, b)
+        medias = ImageStat.Stat(diferenca).mean
+
+        return sum(medias) / len(medias) < 8
+
+    except (OSError, ValueError):
+        return False
 
 
 # =====================================================
@@ -240,7 +425,8 @@ def texto_erro(resposta):
 
     if chave:
         mensagem = mensagem.replace(
-            chave, "[CHAVE OCULTA]"
+            chave,
+            "[CHAVE OCULTA]"
         )
 
     return (
@@ -256,9 +442,15 @@ def modelo_elegivel(nome):
         return False
 
     proibidos = [
-        "image", "tts", "transcribe", "audio",
-        "omni", "robotics", "computer-use",
-        "nano-banana", "customtools"
+        "image",
+        "tts",
+        "transcribe",
+        "audio",
+        "omni",
+        "robotics",
+        "computer-use",
+        "nano-banana",
+        "customtools"
     ]
 
     if any(p in nome for p in proibidos):
@@ -304,7 +496,9 @@ def listar_modelos_elegiveis():
             )
 
             nome = item.get("name", "").replace(
-                "models/", "", 1
+                "models/",
+                "",
+                1
             )
 
             if (
@@ -437,6 +631,7 @@ def consultar_modelo(foto, modelo):
             json=payload,
             timeout=90
         )
+
     except requests.RequestException as erro:
         return (
             None,
@@ -532,10 +727,13 @@ def identificar_automaticamente(foto):
             )
 
             ficha, erro, interromper = consultar_modelo(
-                foto, modelo
+                foto,
+                modelo
             )
 
-            progresso.progress(indice / len(modelos))
+            progresso.progress(
+                indice / len(modelos)
+            )
 
             if ficha is not None:
                 st.session_state[
@@ -575,7 +773,7 @@ def identificar_automaticamente(foto):
 
 
 # =====================================================
-# PLANTNET COM FOTOS DE REFERÊNCIA
+# PLANTNET
 # =====================================================
 
 def consultar_plantnet(foto):
@@ -612,44 +810,130 @@ def consultar_plantnet(foto):
     return resposta.json().get("results", [])
 
 
-def foto_referencia_plantnet(resultado):
-    """
-    Busca uma URL de imagem de referência
-    nos resultados da API Pl@ntNet.
-    """
+def urls_referencia_plantnet(resultado):
+    urls_encontradas = []
+
     imagens = resultado.get("images") or []
 
     for imagem in imagens:
+        if not isinstance(imagem, dict):
+            continue
+
         urls = imagem.get("url") or {}
 
         if isinstance(urls, str):
-            if urls.startswith("https://"):
-                return urls
+            candidatas = [urls]
 
         elif isinstance(urls, dict):
-            for tamanho in ["m", "o", "s"]:
-                url = urls.get(tamanho)
+            candidatas = [
+                urls.get("m"),
+                urls.get("o"),
+                urls.get("s")
+            ]
 
-                if (
-                    isinstance(url, str)
-                    and url.startswith("https://")
-                ):
-                    return url
+        else:
+            candidatas = []
+
+        for url in candidatas:
+            if (
+                isinstance(url, str)
+                and url.startswith("https://")
+                and url not in urls_encontradas
+            ):
+                urls_encontradas.append(url)
+
+    return urls_encontradas
+
+
+@st.cache_data(
+    show_spinner=False,
+    ttl=3600,
+    max_entries=150
+)
+def baixar_imagem_referencia(url):
+    try:
+        resposta = requests.get(
+            url,
+            timeout=12,
+            headers={
+                "User-Agent": "MeuJardim/1.0"
+            }
+        )
+
+        resposta.raise_for_status()
+
+        tipo = resposta.headers.get(
+            "Content-Type", ""
+        ).lower()
+
+        if not tipo.startswith("image/"):
+            return None
+
+        if len(resposta.content) > 8_000_000:
+            return None
+
+        imagem = Image.open(
+            io.BytesIO(resposta.content)
+        )
+        imagem.load()
+        imagem = ImageOps.exif_transpose(imagem)
+        imagem = imagem.convert("RGB")
+        imagem.thumbnail((900, 900))
+
+        buffer = io.BytesIO()
+        imagem.save(
+            buffer,
+            format="JPEG",
+            quality=85
+        )
+
+        return buffer.getvalue()
+
+    except (
+        requests.RequestException,
+        OSError,
+        ValueError
+    ):
+        return None
+
+
+def encontrar_foto_referencia(resultado, foto_usuario):
+    urls = urls_referencia_plantnet(resultado)
+
+    for url in urls[:8]:
+        imagem = baixar_imagem_referencia(url)
+
+        if imagem is None:
+            continue
+
+        if imagens_praticamente_iguais(
+            imagem,
+            foto_usuario
+        ):
+            continue
+
+        return imagem
 
     return None
 
 
 def mostrar_resultados_plantnet(foto, resultados):
-    st.subheader("🔎 Comparação com Pl@ntNet")
-
-    st.caption(
-        "Compare sua fotografia com as imagens "
-        "de referência fornecidas pelo Pl@ntNet."
-    )
+    st.subheader("🔎 Segunda opinião do Pl@ntNet")
 
     if not resultados:
         st.info("Nenhuma sugestão encontrada.")
         return
+
+    st.markdown("**Sua fotografia**")
+    st.image(
+        foto,
+        width=260
+    )
+
+    st.caption(
+        "As fotografias de referência aparecem "
+        "somente quando disponíveis."
+    )
 
     for indice, item in enumerate(resultados[:5], 1):
         especie = item.get("species") or {}
@@ -666,12 +950,11 @@ def mostrar_resultados_plantnet(foto, resultados):
 
         nome_popular = (
             nomes_comuns[0]
-            if nomes_comuns else ""
+            if nomes_comuns
+            else ""
         )
 
         score = float(item.get("score") or 0)
-
-        url_referencia = foto_referencia_plantnet(item)
 
         with st.container(border=True):
             st.markdown(
@@ -682,48 +965,25 @@ def mostrar_resultados_plantnet(foto, resultados):
                 st.caption(nome_popular)
 
             st.write(
-                f"Correspondência estimada: "
+                f"Correspondência: "
                 f"**{score * 100:.1f}%**"
             )
 
-            col_sua, col_ref = st.columns(
-                2, gap="medium"
+            referencia = encontrar_foto_referencia(
+                item,
+                foto
             )
 
-            with col_sua:
-                st.markdown("**Sua fotografia**")
+            if referencia is not None:
                 st.image(
-                    foto,
-                    use_container_width=True
+                    referencia,
+                    width=260,
+                    caption="Fotografia de referência"
                 )
-
-            with col_ref:
-                st.markdown(
-                    "**Fotografia de referência**"
-                )
-
-                if url_referencia:
-                    try:
-                        st.image(
-                            url_referencia,
-                            use_container_width=True
-                        )
-                    except Exception:
-                        st.info(
-                            "A imagem de referência "
-                            "não pôde ser carregada."
-                        )
-                else:
-                    st.info(
-                        "O Pl@ntNet não forneceu "
-                        "fotografia de referência "
-                        "para este resultado."
-                    )
 
     st.caption(
-        "As fotografias são referências visuais. "
-        "O percentual é um score do sistema, "
-        "não uma garantia de identificação."
+        "O percentual é o score do Pl@ntNet, "
+        "não uma confirmação definitiva."
     )
 
 
@@ -1031,41 +1291,753 @@ def indicadores_compactos(planta):
         icone for icone, _, _ in indicadores
     )
 
-    descricao = " | ".join(
-        f"{titulo}: {valor}"
-        for _, titulo, valor in indicadores
-    )
-
     st.markdown(
-        "<div style='text-align:center;"
-        "font-size:19px;letter-spacing:2px;"
-        "margin:3px 0'>"
+        "<div class='simbolos-planta'>"
         f"{simbolos}"
         "</div>",
         unsafe_allow_html=True
     )
 
-    st.caption(descricao)
-
 
 def indicadores_detalhados(planta):
-    colunas = st.columns(4)
+    linhas = []
 
-    for coluna, (icone, titulo, valor) in zip(
-        colunas,
-        dados_indicadores(planta)
-    ):
-        with coluna:
-            st.markdown(
-                "<div style='text-align:center'>"
-                f"<div style='font-size:27px'>{icone}</div>"
-                f"<div style='font-size:12px'>"
-                f"<b>{escape(titulo)}</b></div>"
-                f"<div style='font-size:12px'>"
-                f"{escape(valor)}</div>"
-                "</div>",
-                unsafe_allow_html=True
+    for icone, titulo, valor in dados_indicadores(planta):
+        linhas.append(
+            "<div style='text-align:center;min-width:0'>"
+            f"<div style='font-size:24px'>{icone}</div>"
+            f"<div style='font-size:11px'>"
+            f"<b>{escape(titulo)}</b></div>"
+            f"<div style='font-size:11px;"
+            f"overflow-wrap:anywhere'>"
+            f"{escape(valor)}</div>"
+            "</div>"
+        )
+
+    st.markdown(
+        "<div style='display:grid;"
+        "grid-template-columns:repeat(4,minmax(0,1fr));"
+        "gap:5px;margin:15px 0'>"
+        + "".join(linhas)
+        + "</div>",
+        unsafe_allow_html=True
+    )
+
+
+# =====================================================
+# PDF: FONTES E ESTILOS
+# =====================================================
+
+def registrar_fontes_pdf():
+    """
+    Procura fontes Unicode instaladas no sistema.
+    Permite imprimir corretamente os acentos.
+    """
+    import os
+
+    candidatos = [
+        (
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/"
+            "DejaVuSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/liberation2/"
+            "LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation2/"
+            "LiberationSans-Bold.ttf"
+        ),
+        (
+            "/usr/share/fonts/truetype/liberation/"
+            "LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/"
+            "LiberationSans-Bold.ttf"
+        )
+    ]
+
+    for regular, negrito in candidatos:
+        if os.path.exists(regular):
+            if "JardimRegular" not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(
+                    TTFont("JardimRegular", regular)
+                )
+
+            if os.path.exists(negrito):
+                if "JardimBold" not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(
+                        TTFont("JardimBold", negrito)
+                    )
+
+                return "JardimRegular", "JardimBold"
+
+            return "JardimRegular", "JardimRegular"
+
+    return "Helvetica", "Helvetica-Bold"
+
+
+def estilos_pdf():
+    regular, negrito = registrar_fontes_pdf()
+
+    estilos = {}
+
+    estilos["titulo"] = ParagraphStyle(
+        "JardimTitulo",
+        fontName=negrito,
+        fontSize=19,
+        leading=25,
+        textColor=colors.HexColor("#244D36"),
+        spaceAfter=9
+    )
+
+    estilos["subtitulo"] = ParagraphStyle(
+        "JardimSubtitulo",
+        fontName=regular,
+        fontSize=9,
+        leading=14,
+        textColor=colors.HexColor("#555555"),
+        spaceAfter=12
+    )
+
+    estilos["nome"] = ParagraphStyle(
+        "JardimNome",
+        fontName=negrito,
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor("#244D36"),
+        spaceAfter=3
+    )
+
+    estilos["cientifico"] = ParagraphStyle(
+        "JardimCientifico",
+        fontName=regular,
+        fontSize=8,
+        leading=12,
+        textColor=colors.HexColor("#666666"),
+        spaceAfter=5
+    )
+
+    estilos["corpo"] = ParagraphStyle(
+        "JardimCorpo",
+        fontName=regular,
+        fontSize=9,
+        leading=14,
+        textColor=colors.HexColor("#222222"),
+        spaceAfter=6
+    )
+
+    estilos["pequeno"] = ParagraphStyle(
+        "JardimPequeno",
+        fontName=regular,
+        fontSize=7.5,
+        leading=11,
+        textColor=colors.HexColor("#444444")
+    )
+
+    estilos["secao"] = ParagraphStyle(
+        "JardimSecao",
+        fontName=negrito,
+        fontSize=10,
+        leading=15,
+        textColor=colors.HexColor("#244D36"),
+        spaceBefore=9,
+        spaceAfter=5
+    )
+
+    estilos["centro"] = ParagraphStyle(
+        "JardimCentro",
+        fontName=regular,
+        fontSize=8,
+        leading=11,
+        alignment=TA_CENTER,
+        textColor=colors.HexColor("#444444")
+    )
+
+    return estilos
+
+
+def ptexto(valor):
+    """
+    Escapa caracteres para uso seguro
+    em Paragraph do ReportLab.
+    """
+    return escape(texto(valor)).replace(
+        "\n",
+        "<br/>"
+    )
+
+
+def imagem_pdf(foto, largura, altura):
+    """
+    Cria miniatura centralizada sem deformação.
+    """
+    if not foto:
+        return Spacer(1, altura)
+
+    try:
+        imagem = Image.open(io.BytesIO(foto))
+        imagem = ImageOps.exif_transpose(imagem)
+        imagem = imagem.convert("RGB")
+
+        imagem.thumbnail((900, 900))
+
+        iw, ih = imagem.size
+
+        escala = min(
+            largura / iw,
+            altura / ih
+        )
+
+        w = iw * escala
+        h = ih * escala
+
+        buffer = io.BytesIO()
+        imagem.save(
+            buffer,
+            format="JPEG",
+            quality=85
+        )
+        buffer.seek(0)
+
+        figura = PDFImage(
+            buffer,
+            width=w,
+            height=h
+        )
+
+        figura.hAlign = "CENTER"
+        return figura
+
+    except (OSError, ValueError, ZeroDivisionError):
+        return Spacer(1, altura)
+
+
+def rodape_pdf(canvas, doc):
+    canvas.saveState()
+
+    largura, _ = A4
+
+    canvas.setStrokeColor(
+        colors.HexColor("#DDDDDD")
+    )
+
+    canvas.line(
+        16 * mm,
+        15 * mm,
+        largura - 16 * mm,
+        15 * mm
+    )
+
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(
+        colors.HexColor("#666666")
+    )
+
+    canvas.drawString(
+        16 * mm,
+        10 * mm,
+        "Meu Jardim | Catálogo pessoal"
+    )
+
+    canvas.drawRightString(
+        largura - 16 * mm,
+        10 * mm,
+        f"Página {doc.page}"
+    )
+
+    canvas.restoreState()
+
+
+def criar_documento_pdf(buffer):
+    return SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=16 * mm,
+        leftMargin=16 * mm,
+        topMargin=17 * mm,
+        bottomMargin=21 * mm,
+        title="Meu Jardim",
+        author="Meu Jardim"
+    )
+
+
+def cabecalho_relatorio(estilos, titulo, quantidade):
+    return [
+        Paragraph(
+            ptexto(titulo),
+            estilos["titulo"]
+        ),
+        Paragraph(
+            (
+                f"Gerado em "
+                f"{datetime.now().strftime('%d/%m/%Y %H:%M')}"
+                f" | {quantidade} planta(s)"
+            ),
+            estilos["subtitulo"]
+        )
+    ]
+
+
+# =====================================================
+# PDF RESUMIDO
+# =====================================================
+
+def cartao_pdf_resumido(planta, estilos):
+    largura = 53 * mm
+
+    nome = (
+        planta.get("nome_comum")
+        or "Sem nome"
+    )
+
+    cientifico = (
+        planta.get("nome_cientifico")
+        or "Nome científico não informado"
+    )
+
+    informacoes = [
+        imagem_pdf(
+            planta.get("imagem"),
+            47 * mm,
+            43 * mm
+        ),
+        Spacer(1, 5),
+        Paragraph(
+            ptexto(nome),
+            estilos["nome"]
+        ),
+        Paragraph(
+            ptexto(cientifico),
+            estilos["cientifico"]
+        ),
+        Paragraph(
+            "Luz: " + ptexto(
+                planta.get("grupo") or "Não definida"
+            ),
+            estilos["pequeno"]
+        ),
+        Paragraph(
+            "Solo: " + ptexto(
+                planta.get("solo_tipo") or "Não definido"
+            ),
+            estilos["pequeno"]
+        ),
+        Paragraph(
+            "Toxicidade: " + ptexto(
+                planta.get("toxicidade") or "Não verificada"
+            ),
+            estilos["pequeno"]
+        ),
+        Paragraph(
+            "Raridade: " + ptexto(
+                planta.get("raridade") or "Não avaliada"
+            ),
+            estilos["pequeno"]
+        )
+    ]
+
+    return Table(
+        [[informacoes]],
+        colWidths=[largura],
+        style=TableStyle([
+            (
+                "BOX",
+                (0, 0),
+                (-1, -1),
+                0.5,
+                colors.HexColor("#DDDDDD")
+            ),
+            (
+                "BACKGROUND",
+                (0, 0),
+                (-1, -1),
+                colors.white
+            ),
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "TOP"
+            ),
+            (
+                "LEFTPADDING",
+                (0, 0),
+                (-1, -1),
+                3 * mm
+            ),
+            (
+                "RIGHTPADDING",
+                (0, 0),
+                (-1, -1),
+                3 * mm
+            ),
+            (
+                "TOPPADDING",
+                (0, 0),
+                (-1, -1),
+                3 * mm
+            ),
+            (
+                "BOTTOMPADDING",
+                (0, 0),
+                (-1, -1),
+                3 * mm
             )
+        ])
+    )
+
+
+def gerar_pdf_resumido(plantas):
+    buffer = io.BytesIO()
+    doc = criar_documento_pdf(buffer)
+    estilos = estilos_pdf()
+
+    elementos = cabecalho_relatorio(
+        estilos,
+        "Meu Jardim | Catálogo resumido",
+        len(plantas)
+    )
+
+    if not plantas:
+        elementos.append(
+            Paragraph(
+                "Nenhuma planta selecionada.",
+                estilos["corpo"]
+            )
+        )
+    else:
+        cartoes = [
+            cartao_pdf_resumido(p, estilos)
+            for p in plantas
+        ]
+
+        linhas = []
+
+        for inicio in range(0, len(cartoes), 3):
+            linha = cartoes[inicio:inicio + 3]
+
+            while len(linha) < 3:
+                linha.append("")
+
+            linhas.append(linha)
+
+        tabela = Table(
+            linhas,
+            colWidths=[59 * mm] * 3,
+            hAlign="CENTER"
+        )
+
+        tabela.setStyle(TableStyle([
+            (
+                "VALIGN",
+                (0, 0),
+                (-1, -1),
+                "TOP"
+            ),
+            (
+                "LEFTPADDING",
+                (0, 0),
+                (-1, -1),
+                2 * mm
+            ),
+            (
+                "RIGHTPADDING",
+                (0, 0),
+                (-1, -1),
+                2 * mm
+            ),
+            (
+                "TOPPADDING",
+                (0, 0),
+                (-1, -1),
+                2 * mm
+            ),
+            (
+                "BOTTOMPADDING",
+                (0, 0),
+                (-1, -1),
+                2 * mm
+            )
+        ]))
+
+        elementos.append(tabela)
+
+    doc.build(
+        elementos,
+        onFirstPage=rodape_pdf,
+        onLaterPages=rodape_pdf
+    )
+
+    return buffer.getvalue()
+
+
+# =====================================================
+# PDF COMPLETO
+# =====================================================
+
+def tabela_dados_pdf(planta, estilos):
+    dados = [
+        (
+            "Nome popular",
+            planta.get("nome_comum")
+        ),
+        (
+            "Nome científico",
+            planta.get("nome_cientifico")
+        ),
+        (
+            "Família",
+            planta.get("familia")
+        ),
+        (
+            "Luminosidade",
+            planta.get("grupo") or "Não definida"
+        ),
+        (
+            "Tipo de solo",
+            planta.get("solo_tipo") or "Não definido"
+        ),
+        (
+            "Toxicidade",
+            planta.get("toxicidade") or "Não verificada"
+        ),
+        (
+            "Raridade",
+            planta.get("raridade") or "Não avaliada"
+        ),
+        (
+            "Situação",
+            planta.get("status")
+        )
+    ]
+
+    linhas = []
+
+    for titulo, valor in dados:
+        linhas.append([
+            Paragraph(
+                "<b>" + ptexto(titulo) + "</b>",
+                estilos["pequeno"]
+            ),
+            Paragraph(
+                ptexto(valor or "Não informado"),
+                estilos["pequeno"]
+            )
+        ])
+
+    tabela = Table(
+        linhas,
+        colWidths=[39 * mm, 137 * mm],
+        hAlign="LEFT"
+    )
+
+    tabela.setStyle(TableStyle([
+        (
+            "VALIGN",
+            (0, 0),
+            (-1, -1),
+            "TOP"
+        ),
+        (
+            "LINEBELOW",
+            (0, 0),
+            (-1, -1),
+            0.3,
+            colors.HexColor("#E5E5E5")
+        ),
+        (
+            "LEFTPADDING",
+            (0, 0),
+            (-1, -1),
+            3
+        ),
+        (
+            "RIGHTPADDING",
+            (0, 0),
+            (-1, -1),
+            3
+        ),
+        (
+            "TOPPADDING",
+            (0, 0),
+            (-1, -1),
+            5
+        ),
+        (
+            "BOTTOMPADDING",
+            (0, 0),
+            (-1, -1),
+            5
+        )
+    ]))
+
+    return tabela
+
+
+def gerar_pdf_completo(plantas):
+    buffer = io.BytesIO()
+    doc = criar_documento_pdf(buffer)
+    estilos = estilos_pdf()
+
+    elementos = []
+
+    if not plantas:
+        elementos.extend(
+            cabecalho_relatorio(
+                estilos,
+                "Meu Jardim | Fichas completas",
+                0
+            )
+        )
+        elementos.append(
+            Paragraph(
+                "Nenhuma planta selecionada.",
+                estilos["corpo"]
+            )
+        )
+
+    for indice, planta in enumerate(plantas):
+        if indice > 0:
+            elementos.append(PageBreak())
+
+        elementos.extend(
+            cabecalho_relatorio(
+                estilos,
+                "Ficha botânica",
+                len(plantas)
+            )
+        )
+
+        elementos.append(
+            Paragraph(
+                ptexto(
+                    planta.get("nome_comum")
+                    or "Planta sem nome"
+                ),
+                estilos["titulo"]
+            )
+        )
+
+        if planta.get("imagem"):
+            elementos.append(
+                imagem_pdf(
+                    planta["imagem"],
+                    90 * mm,
+                    65 * mm
+                )
+            )
+
+            elementos.append(Spacer(1, 8))
+
+        elementos.append(
+            tabela_dados_pdf(
+                planta,
+                estilos
+            )
+        )
+
+        if planta.get("justificativa_raridade"):
+            elementos.append(
+                Paragraph(
+                    "Raridade",
+                    estilos["secao"]
+                )
+            )
+            elementos.append(
+                Paragraph(
+                    ptexto(
+                        planta["justificativa_raridade"]
+                    ),
+                    estilos["corpo"]
+                )
+            )
+
+        elementos.append(
+            Paragraph(
+                "Cuidados e cultivo",
+                estilos["secao"]
+            )
+        )
+
+        cuidados = (
+            planta.get("cuidados")
+            or "Ficha de cuidados não preenchida."
+        )
+
+        blocos = cuidados.split("\n\n")
+
+        for bloco in blocos:
+            bloco = bloco.strip()
+
+            if not bloco:
+                continue
+
+            linhas = bloco.split("\n", 1)
+
+            if (
+                len(linhas) == 2
+                and linhas[0].isupper()
+                and len(linhas[0]) < 60
+            ):
+                elementos.append(
+                    KeepTogether([
+                        Paragraph(
+                            ptexto(linhas[0]),
+                            estilos["secao"]
+                        ),
+                        Paragraph(
+                            ptexto(linhas[1]),
+                            estilos["corpo"]
+                        )
+                    ])
+                )
+
+            else:
+                elementos.append(
+                    Paragraph(
+                        ptexto(bloco),
+                        estilos["corpo"]
+                    )
+                )
+
+        if planta.get("observacoes"):
+            elementos.append(
+                Paragraph(
+                    "Minhas observações",
+                    estilos["secao"]
+                )
+            )
+            elementos.append(
+                Paragraph(
+                    ptexto(
+                        planta["observacoes"]
+                    ),
+                    estilos["corpo"]
+                )
+            )
+
+        elementos.append(Spacer(1, 8))
+
+        elementos.append(
+            Paragraph(
+                (
+                    "A identificação e as informações "
+                    "de cultivo podem ter sido geradas "
+                    "por inteligência artificial. "
+                    "Verifique especialmente a "
+                    "toxicidade para animais."
+                ),
+                estilos["pequeno"]
+            )
+        )
+
+    doc.build(
+        elementos,
+        onFirstPage=rodape_pdf,
+        onLaterPages=rodape_pdf
+    )
+
+    return buffer.getvalue()
 
 
 # =====================================================
@@ -1079,9 +2051,13 @@ def abrir_ficha(planta):
     st.subheader(planta["nome_comum"])
 
     if planta.get("nome_cientifico"):
-        st.caption(planta["nome_cientifico"])
+        st.caption(
+            planta["nome_cientifico"]
+        )
 
-    st.caption(f"Situação: {planta['status']}")
+    st.caption(
+        f"Situação: {planta['status']}"
+    )
 
     if planta.get("imagem"):
         st.image(
@@ -1094,6 +2070,7 @@ def abrir_ficha(planta):
     st.divider()
 
     st.markdown("**Cuidados e cultivo**")
+
     st.text(
         texto(planta.get("cuidados"))
         or "Ficha não preenchida."
@@ -1107,7 +2084,9 @@ def abrir_ficha(planta):
 
     if planta.get("observacoes"):
         st.markdown("**Minhas observações**")
-        st.write(planta["observacoes"])
+        st.write(
+            planta["observacoes"]
+        )
 
     st.caption(
         "Informações geradas por IA devem ser "
@@ -1131,7 +2110,9 @@ def abrir_ficha(planta):
             st.rerun()
 
     with st.expander("🗑️ Excluir planta"):
-        st.warning("A exclusão é definitiva.")
+        st.warning(
+            "A exclusão é definitiva."
+        )
 
         confirmar = st.checkbox(
             "Confirmo que desejo excluir esta planta",
@@ -1159,18 +2140,18 @@ def cartao_compacto(planta):
                     imagem_quadrada(planta["imagem"]),
                     use_container_width=True
                 )
+
             except (OSError, ValueError):
                 st.caption("Imagem indisponível")
         else:
             st.info("Sem foto")
 
-        nome = texto(planta.get("nome_comum"))
+        nome = texto(
+            planta.get("nome_comum")
+        )
 
         st.markdown(
-            "<div style='text-align:center;"
-            "font-size:13px;font-weight:650;"
-            "min-height:40px;line-height:1.3;"
-            "overflow-wrap:anywhere'>"
+            "<div class='nome-planta'>"
             f"{escape(nome)}"
             "</div>",
             unsafe_allow_html=True
@@ -1178,6 +2159,7 @@ def cartao_compacto(planta):
 
         if planta["status"] == "Pendente":
             st.caption("🟡 Pendente")
+
         elif planta["status"] == "Arquivada":
             st.caption("📦 Arquivada")
 
@@ -1200,11 +2182,12 @@ preparar_banco()
 st.title("🪴 Meu Jardim")
 st.caption("Seu catálogo pessoal de plantas")
 
-st.warning(
-    "O armazenamento ainda é provisório. "
-    "Os registros podem ser perdidos quando "
-    "o Streamlit Cloud reiniciar."
-)
+with st.expander("ℹ️ Sobre o armazenamento"):
+    st.warning(
+        "O armazenamento ainda é provisório. "
+        "Os registros podem ser perdidos quando "
+        "o Streamlit Cloud reiniciar."
+    )
 
 aba_identificar, aba_catalogo = st.tabs([
     "📸 Identificar planta",
@@ -1251,6 +2234,7 @@ with aba_identificar:
     if arquivo is not None:
         try:
             foto = tratar_foto(arquivo)
+
             assinatura = hashlib.sha256(
                 foto
             ).hexdigest()
@@ -1266,69 +2250,67 @@ with aba_identificar:
                 ]:
                     st.session_state.pop(chave, None)
 
-            col_foto, col_acoes = st.columns([1, 1])
+            st.image(
+                foto,
+                width=320,
+                caption="Fotografia enviada"
+            )
 
-            with col_foto:
-                st.image(
-                    foto,
-                    use_container_width=True
-                )
+            st.subheader("Análise da fotografia")
 
-            with col_acoes:
-                st.subheader("Análise da fotografia")
-
-                if st.button(
-                    "✨ Gerar ficha automaticamente",
-                    type="primary",
-                    use_container_width=True
-                ):
-                    try:
-                        with st.spinner(
-                            "Identificando a planta..."
-                        ):
-                            ficha, modelo_usado = (
-                                identificar_automaticamente(foto)
-                            )
-
-                        st.session_state["ficha_ia"] = ficha
-                        st.session_state.pop(
-                            "foto_salva",
-                            None
+            if st.button(
+                "✨ Gerar ficha automaticamente",
+                type="primary",
+                use_container_width=True
+            ):
+                try:
+                    with st.spinner(
+                        "Identificando a planta..."
+                    ):
+                        ficha, modelo_usado = (
+                            identificar_automaticamente(foto)
                         )
 
-                        st.success(
-                            "Ficha gerada com sucesso! "
-                            f"Modelo: {modelo_usado}"
-                        )
+                    st.session_state["ficha_ia"] = ficha
 
-                    except ValueError as erro:
-                        st.error(str(erro))
+                    st.session_state.pop(
+                        "foto_salva",
+                        None
+                    )
 
-                    except requests.RequestException as erro:
-                        st.error(
-                            "Falha de conexão: "
-                            + type(erro).__name__
-                        )
+                    st.success(
+                        "Ficha gerada com sucesso! "
+                        f"Modelo: {modelo_usado}"
+                    )
 
-                if st.button(
-                    "🔎 Segunda opinião: Pl@ntNet",
-                    use_container_width=True
-                ):
-                    try:
-                        with st.spinner(
-                            "Consultando Pl@ntNet..."
-                        ):
-                            resultados = consultar_plantnet(foto)
+                except ValueError as erro:
+                    st.error(str(erro))
 
-                        st.session_state[
-                            "opiniao_plantnet"
-                        ] = resultados
+                except requests.RequestException as erro:
+                    st.error(
+                        "Falha de conexão: "
+                        + type(erro).__name__
+                    )
 
-                    except (
-                        ValueError,
-                        requests.RequestException
-                    ) as erro:
-                        st.error(str(erro))
+            if st.button(
+                "🔎 Segunda opinião: Pl@ntNet",
+                use_container_width=True
+            ):
+                try:
+                    with st.spinner(
+                        "Consultando Pl@ntNet..."
+                    ):
+                        resultados = consultar_plantnet(foto)
+
+                    st.session_state[
+                        "opiniao_plantnet"
+                    ] = resultados
+
+                except (
+                    ValueError,
+                    requests.RequestException
+                ) as erro:
+                    st.error(str(erro))
 
             diagnostico = st.session_state.get(
                 "diagnostico_gemini"
@@ -1350,7 +2332,7 @@ with aba_identificar:
 
             if resultados is not None:
                 with st.expander(
-                    "🌿 Comparar com fotografias do Pl@ntNet",
+                    "🌿 Resultados do Pl@ntNet",
                     expanded=True
                 ):
                     mostrar_resultados_plantnet(
@@ -1358,11 +2340,15 @@ with aba_identificar:
                         resultados
                     )
 
-            ficha = st.session_state.get("ficha_ia")
+            ficha = st.session_state.get(
+                "ficha_ia"
+            )
 
             if ficha:
                 st.divider()
-                st.subheader("🌿 Ficha botânica sugerida")
+                st.subheader(
+                    "🌿 Ficha botânica sugerida"
+                )
 
                 if ficha.get("identificacao_incerta"):
                     st.warning(
@@ -1410,6 +2396,7 @@ with aba_identificar:
                     st.success(
                         "Planta salva no catálogo!"
                     )
+
                 else:
                     ficha_id = hashlib.sha256(
                         json.dumps(
@@ -1449,85 +2436,117 @@ with aba_identificar:
 
 
 # =====================================================
-# CATÁLOGO COMPACTO
+# CATÁLOGO
 # =====================================================
 
 with aba_catalogo:
     plantas = plantas_salvas()
 
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "🌿 No catálogo",
-        sum(
-            p["status"] == "No catálogo"
-            for p in plantas
-        )
+    total_catalogo = sum(
+        p["status"] == "No catálogo"
+        for p in plantas
     )
 
-    c2.metric(
-        "🟡 Pendentes",
-        sum(
-            p["status"] == "Pendente"
-            for p in plantas
-        )
+    total_pendentes = sum(
+        p["status"] == "Pendente"
+        for p in plantas
     )
 
-    c3.metric(
-        "📦 Arquivadas",
-        sum(
-            p["status"] == "Arquivada"
-            for p in plantas
-        )
+    total_arquivadas = sum(
+        p["status"] == "Arquivada"
+        for p in plantas
+    )
+
+    st.markdown(
+        "<div class='resumo-jardim'>"
+
+        "<div class='resumo-item'>"
+        "<div class='resumo-legenda'>🌿 No catálogo</div>"
+        f"<div class='resumo-numero'>{total_catalogo}</div>"
+        "</div>"
+
+        "<div class='resumo-item'>"
+        "<div class='resumo-legenda'>🟡 Pendentes</div>"
+        f"<div class='resumo-numero'>{total_pendentes}</div>"
+        "</div>"
+
+        "<div class='resumo-item'>"
+        "<div class='resumo-legenda'>📦 Arquivadas</div>"
+        f"<div class='resumo-numero'>{total_arquivadas}</div>"
+        "</div>"
+
+        "</div>",
+        unsafe_allow_html=True
     )
 
     st.subheader("Minha coleção")
 
-    barra1, barra2 = st.columns([3, 1])
+    busca = st.text_input(
+        "🔎 Buscar planta",
+        placeholder="Nome popular ou científico"
+    )
 
-    with barra1:
-        busca = st.text_input(
-            "🔎 Buscar planta",
-            placeholder="Nome popular ou científico"
+    colunas_galeria = st.selectbox(
+        "Fotos por linha no computador",
+        [5, 6, 4, 3],
+        index=0
+    )
+
+    st.caption(
+        "No celular, a galeria é organizada "
+        "em duas colunas."
+    )
+
+    # =================================================
+    # FILTROS COMBINADOS
+    # =================================================
+
+    with st.expander(
+        "🎛️ Filtrar coleção",
+        expanded=True
+    ):
+        st.caption(
+            "Combine os critérios para encontrar "
+            "as plantas desejadas."
         )
 
-    with barra2:
-        colunas_galeria = st.selectbox(
-            "Fotos por linha",
-            [5, 6, 4, 3],
-            index=0
+        filtro_status = st.multiselect(
+            "Situação",
+            STATUS,
+            default=["No catálogo", "Pendente"]
         )
 
-    with st.expander("🎛️ Filtrar coleção"):
-        f1, f2 = st.columns(2)
+        filtro_luz = st.selectbox(
+            "☀️ Luminosidade",
+            ["Todas", "Não definida"] + GRUPOS
+        )
 
-        with f1:
-            filtro_status = st.multiselect(
-                "Situação",
-                STATUS,
-                default=["No catálogo", "Pendente"]
-            )
+        filtro_solo = st.selectbox(
+            "🌱 Tipo de solo",
+            ["Todos"] + SOLOS
+        )
 
-            filtro_luz = st.selectbox(
-                "Luminosidade",
-                ["Todas", "Não definida"] + GRUPOS
-            )
-
-        with f2:
-            filtro_solo = st.selectbox(
-                "Tipo de solo",
-                ["Todos"] + SOLOS
-            )
-
-            filtro_tox = st.selectbox(
-                "Toxicidade",
-                ["Todas"] + TOXICIDADES
-            )
+        filtro_tox = st.selectbox(
+            "🛡️ Toxicidade",
+            ["Todas"] + TOXICIDADES
+        )
 
         filtro_raridade = st.selectbox(
-            "Raridade",
+            "💎 Raridade",
             ["Todas"] + RARIDADES
         )
+
+        if st.button(
+            "Limpar filtros",
+            use_container_width=True
+        ):
+            st.session_state["limpar_filtros"] = True
+            st.rerun()
+
+    # Limpeza de filtros é aplicada na próxima
+    # execução, antes da criação dos widgets.
+    # Os filtros também podem ser alterados
+    # individualmente pelo usuário.
 
     visiveis = []
 
@@ -1540,13 +2559,22 @@ with aba_catalogo:
         tox = planta.get("toxicidade") or "Não verificada"
         rar = planta.get("raridade") or "Não avaliada"
 
-        if filtro_luz != "Todas" and luz != filtro_luz:
+        if (
+            filtro_luz != "Todas"
+            and luz != filtro_luz
+        ):
             continue
 
-        if filtro_solo != "Todos" and solo != filtro_solo:
+        if (
+            filtro_solo != "Todos"
+            and solo != filtro_solo
+        ):
             continue
 
-        if filtro_tox != "Todas" and tox != filtro_tox:
+        if (
+            filtro_tox != "Todas"
+            and tox != filtro_tox
+        ):
             continue
 
         if (
@@ -1570,29 +2598,160 @@ with aba_catalogo:
         f"{len(visiveis)} planta(s) encontrada(s)"
     )
 
-    if not visiveis:
-        st.info("Nenhuma planta encontrada.")
+    # =================================================
+    # RELATÓRIOS EM PDF
+    # =================================================
 
-    for inicio in range(
-        0,
-        len(visiveis),
-        colunas_galeria
+    with st.expander(
+        "📄 Gerar relatório em PDF",
+        expanded=False
     ):
-        linha = visiveis[
-            inicio:inicio + colunas_galeria
-        ]
-
-        colunas = st.columns(
-            colunas_galeria,
-            gap="small"
+        st.markdown(
+            "Escolha o formato e quais plantas "
+            "deseja incluir no relatório."
         )
 
-        for coluna, planta in zip(
-            colunas,
-            linha
+        formato_pdf = st.radio(
+            "Formato do relatório",
+            [
+                "Catálogo resumido",
+                "Fichas completas"
+            ],
+            horizontal=True
+        )
+
+        abrangencia_pdf = st.radio(
+            "Plantas incluídas",
+            [
+                "Somente plantas filtradas",
+                "Todas as plantas"
+            ],
+            horizontal=True
+        )
+
+        if abrangencia_pdf == "Todas as plantas":
+            plantas_pdf = plantas
+        else:
+            plantas_pdf = visiveis
+
+        st.caption(
+            f"O relatório incluirá "
+            f"{len(plantas_pdf)} planta(s)."
+        )
+
+        if plantas_pdf:
+            assinatura_pdf = hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "id": p["id"],
+                            "nome": p["nome_comum"],
+                            "cuidados": p.get("cuidados"),
+                            "status": p["status"],
+                            "grupo": p.get("grupo"),
+                            "solo": p.get("solo_tipo"),
+                            "toxicidade": p.get("toxicidade"),
+                            "raridade": p.get("raridade")
+                        }
+                        for p in plantas_pdf
+                    ],
+                    sort_keys=True,
+                    ensure_ascii=False
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+
+            chave_pdf = (
+                formato_pdf,
+                abrangencia_pdf,
+                assinatura_pdf
+            )
+
+            if st.button(
+                "Preparar relatório",
+                type="primary",
+                use_container_width=True
+            ):
+                try:
+                    with st.spinner(
+                        "Preparando o PDF..."
+                    ):
+                        if formato_pdf == "Catálogo resumido":
+                            pdf_gerado = gerar_pdf_resumido(
+                                plantas_pdf
+                            )
+                        else:
+                            pdf_gerado = gerar_pdf_completo(
+                                plantas_pdf
+                            )
+
+                    st.session_state["pdf_gerado"] = pdf_gerado
+                    st.session_state["pdf_chave"] = chave_pdf
+
+                    st.success(
+                        "Relatório preparado!"
+                    )
+
+                except Exception as erro:
+                    st.error(
+                        "Não foi possível gerar o PDF: "
+                        + str(erro)
+                    )
+
+            if (
+                st.session_state.get("pdf_chave")
+                == chave_pdf
+                and st.session_state.get("pdf_gerado")
+            ):
+                nome_arquivo = (
+                    "meu_jardim_resumido.pdf"
+                    if formato_pdf == "Catálogo resumido"
+                    else "meu_jardim_fichas.pdf"
+                )
+
+                st.download_button(
+                    "⬇️ Baixar PDF",
+                    data=st.session_state["pdf_gerado"],
+                    file_name=nome_arquivo,
+                    mime="application/pdf",
+                    use_container_width=True
+                )
+
+        else:
+            st.info(
+                "Nenhuma planta selecionada "
+                "para o relatório."
+            )
+
+    # =================================================
+    # GALERIA
+    # =================================================
+
+    if not visiveis:
+        st.info(
+            "Nenhuma planta encontrada."
+        )
+
+    with st.container(key="galeria_responsiva"):
+        for inicio in range(
+            0,
+            len(visiveis),
+            colunas_galeria
         ):
-            with coluna:
-                cartao_compacto(planta)
+            linha = visiveis[
+                inicio:inicio + colunas_galeria
+            ]
+
+            colunas = st.columns(
+                colunas_galeria,
+                gap="small"
+            )
+
+            for coluna, planta in zip(
+                colunas,
+                linha
+            ):
+                with coluna:
+                    cartao_compacto(planta)
 
     st.caption(
         "Clique em 'Ver ficha' para ampliar "
