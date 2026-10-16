@@ -1,128 +1,95 @@
-            ],
-            horizontal=True
-        )
+import base64
+import hashlib
+import io
+import json
+import os
+import re
+import unicodedata
+import uuid
+from datetime import datetime
+from html import escape
+from urllib.parse import quote
 
-        abrangencia = st.radio(
-            "Incluir",
-            [
-                "Somente plantas filtradas",
-                "Todas as plantas"
-            ],
-            horizontal=True
-        )
+import requests
+import streamlit as st
+from PIL import Image, ImageOps, ImageChops, ImageStat
+from supabase import create_client
 
-        plantas_pdf = (
-            plantas
-            if abrangencia == "Todas as plantas"
-            else visiveis
-        )
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    SimpleDocTemplate, Paragraph, Spacer,
+    Table, TableStyle, Image as PDFImage,
+    PageBreak, KeepTogether
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
-        st.caption(
-            f"{len(plantas_pdf)} planta(s) no relatório."
-        )
 
-        if plantas_pdf:
-            assinatura_pdf = hashlib.sha256(
-                json.dumps(
-                    plantas_pdf,
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    default=str
-                ).encode("utf-8")
-            ).hexdigest()
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
 
-            chave_pdf = (
-                formato, abrangencia, assinatura_pdf
-            )
+st.set_page_config(
+    page_title="Meu Jardim",
+    page_icon="🪴",
+    layout="wide"
+)
 
-            if st.button(
-                "Preparar relatório",
-                type="primary",
-                use_container_width=True
-            ):
-                try:
-                    with st.spinner(
-                        "Gerando PDF..."
-                    ):
-                        if formato == "Catálogo resumido":
-                            pdf = gerar_pdf_resumido(
-                                plantas_pdf
-                            )
-                        else:
-                            pdf = gerar_pdf_completo(
-                                plantas_pdf
-                            )
+API_GEMINI = "https://generativelanguage.googleapis.com/v1beta"
+BUCKET = "fotos-plantas"
 
-                    st.session_state[
-                        "pdf_gerado"
-                    ] = pdf
+GRUPOS = ["Sol pleno", "Luz indireta", "Pouca luz"]
+SOLOS = [
+    "Bem drenado", "Orgânico", "Úmido",
+    "Arenoso", "Outro", "Não definido"
+]
+TOXICIDADES = [
+    "Não verificada",
+    "Potencialmente tóxica",
+    "Tóxica",
+    "Sem toxicidade conhecida"
+]
+RARIDADES = ["Não avaliada", "Comum", "Incomum", "Rara"]
+STATUS = ["Pendente", "No catálogo", "Arquivada"]
 
-                    st.session_state[
-                        "pdf_chave"
-                    ] = chave_pdf
+PREFERIDOS = [
+    "gemini-3.1-flash-lite",
+    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
+    "gemini-flash-latest",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash"
+]
 
-                    st.success(
-                        "Relatório preparado!"
-                    )
+CAMPOS_PLANTA = [
+    "nome_comum", "nome_cientifico", "familia",
+    "grupo", "solo_tipo", "toxicidade",
+    "raridade", "justificativa_raridade",
+    "status", "observacoes", "cuidados"
+]
 
-                except Exception as erro:
-                    st.error(
-                        "Erro ao gerar PDF: " + str(erro)
-                    )
 
-            if (
-                st.session_state.get("pdf_chave")
-                == chave_pdf
-                and st.session_state.get("pdf_gerado")
-            ):
-                nome_pdf = (
-                    "meu_jardim_resumido.pdf"
-                    if formato == "Catálogo resumido"
-                    else "meu_jardim_fichas.pdf"
-                )
+# ============================================================
+# ESTILO
+# ============================================================
 
-                st.download_button(
-                    "⬇️ Baixar PDF",
-                    data=st.session_state[
-                        "pdf_gerado"
-                    ],
-                    file_name=nome_pdf,
-                    mime="application/pdf",
-                    use_container_width=True
-                )
-
-        else:
-            st.info(
-                "Nenhuma planta selecionada."
-            )
-
-    # ------------------------------------
-    # GALERIA
-    # ------------------------------------
-
-    if not visiveis:
-        st.info(
-            "Seu catálogo está vazio ou nenhuma "
-            "planta corresponde aos filtros."
-        )
-
-    with st.container(
-        key="galeria_responsiva"
-    ):
-        for inicio in range(
-            0,
-            len(visiveis),
-            colunas_galeria
-        ):
-            linha = visiveis[
-                inicio:inicio + colunas_galeria
-            ]
-
-            colunas = st.columns(
-                colunas_galeria,
-                gap="small"
-            )
-
-            for coluna, planta in zip(
-                colunas, linha
-            ):
+st.markdown("""
+<style>
+.resumo-jardim {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0,1fr));
+    gap: 10px;
+    margin: 12px 0 24px;
+}
+.resumo-item {
+    border: 1px solid rgba(128,128,128,.25);
+    border-radius: 12px;
+    padding: 12px 6px;
+    text-align: center;
+}
+.resumo-numero {
+    font-size: 30px;
+    font-weight: 700;
