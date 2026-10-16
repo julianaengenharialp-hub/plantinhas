@@ -736,180 +736,6 @@ def identificar_automaticamente(foto, rejeitadas=None):
 
 
 # ============================================================
-# PLANTNET
-# ============================================================
-
-def consultar_plantnet(foto):
-    chave = st.secrets.get("PLANTNET_API_KEY")
-
-    if not chave:
-        raise ValueError(
-            "PLANTNET_API_KEY não encontrada."
-        )
-
-    resposta = requests.post(
-        "https://my-api.plantnet.org/v2/identify/all",
-        params={
-            "api-key": chave,
-            "lang": "pt"
-        },
-        files={
-            "images": (
-                "planta.jpg", foto, "image/jpeg"
-            )
-        },
-        data={"organs": "auto"},
-        timeout=60
-    )
-
-    if not resposta.ok:
-        raise ValueError(
-            f"Pl@ntNet: HTTP {resposta.status_code}"
-        )
-
-    return resposta.json().get("results", [])
-
-
-def urls_referencia(resultado):
-    encontradas = []
-
-    for imagem in resultado.get("images") or []:
-        if not isinstance(imagem, dict):
-            continue
-
-        urls = imagem.get("url") or {}
-
-        if isinstance(urls, str):
-            candidatas = [urls]
-        elif isinstance(urls, dict):
-            candidatas = [
-                urls.get("m"),
-                urls.get("o"),
-                urls.get("s")
-            ]
-        else:
-            candidatas = []
-
-        for url in candidatas:
-            if (
-                isinstance(url, str)
-                and url.startswith("https://")
-                and url not in encontradas
-            ):
-                encontradas.append(url)
-
-    return encontradas
-
-
-@st.cache_data(
-    show_spinner=False,
-    ttl=3600,
-    max_entries=150
-)
-def baixar_referencia(url):
-    try:
-        resposta = requests.get(
-            url, timeout=12,
-            headers={"User-Agent": "MeuJardim/1.0"}
-        )
-        resposta.raise_for_status()
-
-        if not resposta.headers.get(
-            "Content-Type", ""
-        ).lower().startswith("image/"):
-            return None
-
-        if len(resposta.content) > 8_000_000:
-            return None
-
-        imagem = Image.open(
-            io.BytesIO(resposta.content)
-        )
-        imagem.load()
-        imagem = ImageOps.exif_transpose(imagem)
-        imagem = imagem.convert("RGB")
-        imagem.thumbnail((900, 900))
-
-        buffer = io.BytesIO()
-        imagem.save(
-            buffer, format="JPEG", quality=85
-        )
-
-        return buffer.getvalue()
-
-    except Exception:
-        return None
-
-
-def foto_referencia(resultado, foto_usuario):
-    for url in urls_referencia(resultado)[:8]:
-        imagem = baixar_referencia(url)
-
-        if imagem is None:
-            continue
-
-        if imagens_iguais(imagem, foto_usuario):
-            continue
-
-        return imagem
-
-    return None
-
-
-def mostrar_plantnet(foto, resultados):
-    st.subheader("Segunda opinião do Pl@ntNet")
-
-    if not resultados:
-        st.info("Nenhuma sugestão encontrada.")
-        return
-
-    st.image(
-        foto, width=250,
-        caption="Sua fotografia"
-    )
-
-    for indice, resultado in enumerate(
-        resultados[:5], 1
-    ):
-        especie = resultado.get("species") or {}
-
-        nome = (
-            especie.get("scientificNameWithoutAuthor")
-            or especie.get("scientificName")
-            or "Espécie não informada"
-        )
-
-        comuns = especie.get("commonNames") or []
-        score = float(resultado.get("score") or 0)
-
-        with st.container(border=True):
-            st.markdown(f"**{indice}. {nome}**")
-
-            if comuns:
-                st.caption(comuns[0])
-
-            st.write(
-                f"Correspondência: {score * 100:.1f}%"
-            )
-
-            referencia = foto_referencia(
-                resultado, foto
-            )
-
-            if referencia:
-                st.image(
-                    referencia,
-                    width=250,
-                    caption="Fotografia de referência"
-                )
-
-    st.caption(
-        "A correspondência não representa "
-        "confirmação definitiva da espécie."
-    )
-
-
-# ============================================================
 # INATURALIST: FOTOGRAFIAS DE REFERÊNCIA
 # ============================================================
 
@@ -1908,7 +1734,6 @@ def reiniciar_analise(assinatura):
 
     for chave in [
         "ficha_ia",
-        "opiniao_plantnet",
         "foto_salva",
         "diagnostico_gemini",
         "identificacoes_rejeitadas",
@@ -2054,23 +1879,6 @@ with aba_identificar:
                 except Exception as erro:
                     st.error(str(erro))
 
-            if st.button(
-                "🔎 Segunda opinião: Pl@ntNet",
-                use_container_width=True
-            ):
-                try:
-                    with st.spinner(
-                        "Consultando Pl@ntNet..."
-                    ):
-                        resultados = consultar_plantnet(foto)
-
-                    st.session_state[
-                        "opiniao_plantnet"
-                    ] = resultados
-
-                except Exception as erro:
-                    st.error(str(erro))
-
             diagnostico = st.session_state.get(
                 "diagnostico_gemini"
             )
@@ -2084,19 +1892,6 @@ with aba_identificar:
                             f"**{tentativa['modelo']}**: "
                             f"{tentativa['resultado']}"
                         )
-
-            resultados = st.session_state.get(
-                "opiniao_plantnet"
-            )
-
-            if resultados is not None:
-                with st.expander(
-                    "🌿 Resultados do Pl@ntNet",
-                    expanded=True
-                ):
-                    mostrar_plantnet(
-                        foto, resultados
-                    )
 
             rejeitadas = st.session_state.get(
                 "identificacoes_rejeitadas", []
